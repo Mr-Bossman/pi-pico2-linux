@@ -1,0 +1,85 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "riscv-minimal-nommu";
+	model = "riscv-minimal-nommu,qemu";
+
+	chosen {
+		bootargs = "earlycon=pl011,mmio32,0x40070000 console=ttyAMA0";
+	};
+
+	memory@11000000 {
+		device_type = "memory";
+		reg = <0x11000000 0x800000>;	/* 8MB */
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		/* sys timer is in Hz */
+		timebase-frequency = <1000000>;
+
+		cpu0: cpu@0 {
+			reg = <0>;
+			device_type = "cpu";
+			compatible = "riscv";
+			riscv,isa = "rv32ima";
+			riscv,isa-base = "rv32i";
+			riscv,isa-extensions = "i", "m", "a";
+			mmu-type = "riscv,none";
+			status = "okay";
+
+			cpu0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				#address-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		ranges;
+
+		uart0: serial@40070000 {
+			compatible = "arm,sbsa-uart";
+			current-speed = <115200>;
+			interrupt-parent = <&plic0>;
+			interrupts = <33>;
+			reg = <0x40070000 0x100>;
+			status = "okay";
+		};
+
+		uart1: serial@40078000 {
+			compatible = "arm,sbsa-uart";
+			current-speed = <115200>;
+			interrupt-parent = <&plic0>;
+			interrupts = <34>;
+			reg = <0x40078000 0x100>;
+			status = "okay";
+		};
+
+		plic0: interrupt-controller@0 {
+			reg = <0x0 0x0>;
+			interrupts-extended = <&cpu0_intc 11>;
+			interrupt-controller;
+			compatible = "generic,simple-intc";
+			#address-cells = <0x00>;
+			#interrupt-cells = <0x01>;
+		};
+
+		/*
+		clint: clint@d0000000 {
+			interrupts-extended = <&cpu0_intc 3>,
+					      <&cpu0_intc 7>;
+			reg = <0xd0000000 0x400>;
+			compatible = "riscv,clint0";
+		};
+		*/
+	};
+};
