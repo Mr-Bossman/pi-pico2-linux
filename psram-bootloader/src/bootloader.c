@@ -71,8 +71,9 @@ int main() {
 
 	ret = wait_for_input("Press y to jump to PSRAM...\r");
 	if (ret == 'y' || ret == 'Y') {
-		((void (*)(void))PSRAM_LOCATION)();
-		printf("Jump to PSRAM returned\n");
+		data = (uint32_t)printf;
+		jump_ret = ((uint32_t (*)(void *))ram_addr)((void *)data);
+		printf("Jump to PSRAM returned 0x%08x\n", jump_ret);
 	}
 
 exit:
@@ -106,7 +107,7 @@ static int test_executability(void* addr) {
 	__mem_fence_release();
 
 	printf("Jumping to 0x%08x, aligned from 0x%08x\n", addr_aligned, (size_t)addr);
-	printf("Function pointers: 0x%08x\n", *addr_ptr);
+	printf("Function pointers: 0x%02x 0x%02x\n", ((uint8_t*)addr_ptr)[0], ((uint8_t*)addr_ptr)[1]);
 
 	if (*addr_ptr != ret_inst) {
 		printf("ERROR: Expected 0x%04x, got 0x%04x\n", ret_inst, *addr_ptr);
