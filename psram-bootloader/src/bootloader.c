@@ -6,12 +6,52 @@
 
 #include <stdio.h>
 #include <ctype.h>
+#include <machine/endian.h>
+#include <stdnoreturn.h>
 #include "pico/stdlib.h"
 #include "pico/bootrom.h"
 #include "boot/picobin.h"
 #include "hardware/watchdog.h"
 #include "hardware/structs/qmi.h"
 #include "hardware/structs/xip_ctrl.h"
+
+#define min(a, b) ((a) < (b) ? (a) : (b))
+
+#if _BYTE_ORDER == _LITTLE_ENDIAN
+
+#define htobe16(x) __bswap16(x)
+#define htole16(x) (x)
+#define be16toh(x) __bswap16(x)
+#define le16toh(x) (x)
+
+#define htobe32(x) __bswap32(x)
+#define htole32(x) (x)
+#define be32toh(x) __bswap32(x)
+#define le32toh(x) (x)
+
+#define htobe64(x) __bswap64(x)
+#define htole64(x) (x)
+#define be64toh(x) __bswap64(x)
+#define le64toh(x) (x)
+
+#else
+
+#define htobe16(x) (x)
+#define htole16(x) __bswap16(x)
+#define be16toh(x) (x)
+#define le16toh(x) __bswap16(x)
+
+#define htobe32(x) (x)
+#define htole32(x) __bswap32(x)
+#define be32toh(x) (x)
+#define le32toh(x) __bswap32(x)
+
+#define htobe64(x) (x)
+#define htole64(x) __bswap64(x)
+#define be64toh(x) (x)
+#define le64toh(x) __bswap64(x)
+
+#endif
 
 #if defined(SPARKFUN_PROMICRO_RP2350)
 
@@ -35,11 +75,12 @@ static int rom_test(void **data_addr, size_t* data_size);
 static int psram_setup_and_test(void);
 static int test_executability(void* addr);
 static int wait_for_input(const char *msg);
+static size_t get_devicetree_size(const void *data);
 
 int main() {
 	int ret;
 	uint32_t jump_ret, data;
-	size_t data_size;
+	size_t data_size, kernel_offset;
 	void *data_addr, *ram_addr = (void *)PSRAM_LOCATION;
 
 	stdio_init_all();
@@ -62,12 +103,33 @@ int main() {
 		goto exit;
 	}
 
-	printf("\nRom dump:\n");
-	hexdump(data_addr, 0x20);
+	if(data_size < 8) {
+		printf("Data size is 0\n");
+		goto exit;
+	}
 
-	memcpy(ram_addr, data_addr, data_size);
+	printf("\nRom dump:\n");
+	hexdump(data_addr, min(data_size, 0x20));
+
+	kernel_offset = get_devicetree_size(data_addr);
+	if (kernel_offset) {
+		printf("Kernel offset: 0x%08x\n", kernel_offset);
+	} else {
+		printf("No kernel + device tree found\n");
+	}
+
+	memcpy(ram_addr, data_addr + kernel_offset, data_size - kernel_offset);
 	printf("\nRam dump:\n");
 	hexdump(ram_addr, 0x20);
+
+	if (kernel_offset) {
+		typedef void (*image_entry_arg_t)(unsigned long hart, void *dtb);
+		image_entry_arg_t image_entry = (image_entry_arg_t)ram_addr;
+
+		printf("\nJumping to kernel at 0x%08x and DT at 0x%08x\n", ram_addr, data_addr);
+		printf("If you are using USB serial, please connect over the hardware serial port.\n");
+		image_entry(0, data_addr);
+	}
 
 	ret = wait_for_input("Press y to jump to PSRAM...\r");
 	if (ret == 'y' || ret == 'Y') {
@@ -95,6 +157,16 @@ static int wait_for_input(const char *msg) {
 		}
 		sleep_ms(1000);
 	}
+}
+
+static size_t get_devicetree_size(const void *data) {
+	const uint32_t *data_ptr = (const uint32_t *)data;
+
+	if (be32toh(data_ptr[0]) == 0xd00dfeed) {
+		return be32toh(data_ptr[1]);
+	}
+
+	return 0;
 }
 
 static int test_executability(void* addr) {
