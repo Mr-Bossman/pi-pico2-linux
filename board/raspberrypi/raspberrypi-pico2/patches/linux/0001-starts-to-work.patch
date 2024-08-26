@@ -1,0 +1,264 @@
+From 8f8417ebd5320a3b21bc9f12f5d93c8d46b592a5 Mon Sep 17 00:00:00 2001
+From: Jesse Taube <jesse@rivosinc.com>
+Date: Sun, 25 Aug 2024 19:38:12 -0400
+Subject: [PATCH] starts to work
+
+---
+ arch/riscv/Kconfig               |  2 +-
+ arch/riscv/Kconfig.socs          |  1 +
+ arch/riscv/include/asm/atomic.h  | 20 +++++-------
+ arch/riscv/include/asm/cmpxchg.h | 19 +++++-------
+ arch/riscv/include/asm/futex.h   |  5 ++-
+ arch/riscv/kernel/entry.S        |  2 +-
+ arch/riscv/kernel/traps.c        | 52 ++++++++++++++++++++++++++++++++
+ 7 files changed, 73 insertions(+), 28 deletions(-)
+
+diff --git a/arch/riscv/Kconfig b/arch/riscv/Kconfig
+index 0525ee2d63c7..52fbb35f306e 100644
+--- a/arch/riscv/Kconfig
++++ b/arch/riscv/Kconfig
+@@ -263,7 +263,7 @@ config MMU
+ 
+ config PAGE_OFFSET
+ 	hex
+-	default 0x80000000 if !MMU && RISCV_M_MODE
++	default 0x11000000 if !MMU && RISCV_M_MODE
+ 	default 0x80200000 if !MMU
+ 	default 0xc0000000 if 32BIT
+ 	default 0xff60000000000000 if 64BIT
+diff --git a/arch/riscv/Kconfig.socs b/arch/riscv/Kconfig.socs
+index f51bb24bc84c..211012ca6831 100644
+--- a/arch/riscv/Kconfig.socs
++++ b/arch/riscv/Kconfig.socs
+@@ -62,6 +62,7 @@ config ARCH_VIRT
+ 	select PM_GENERIC_DOMAINS if PM
+ 	select PM_GENERIC_DOMAINS_OF if PM && OF
+ 	select RISCV_SBI_CPUIDLE if CPU_IDLE && RISCV_SBI
++        select ARM_AMBA
+ 	help
+ 	  This enables support for QEMU Virt Machine.
+ 
+diff --git a/arch/riscv/include/asm/atomic.h b/arch/riscv/include/asm/atomic.h
+index 5b96c2f61adb..b2391c62d718 100644
+--- a/arch/riscv/include/asm/atomic.h
++++ b/arch/riscv/include/asm/atomic.h
+@@ -198,11 +198,10 @@ ATOMIC_OPS(xor, xor, i)
+ #define _arch_atomic_fetch_add_unless(_prev, _rc, counter, _a, _u, sfx)	\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "     %[p],  %[c]\n"			\
++		"0:	l" sfx "       %[p],  %[c]\n"			\
+ 		"	beq	       %[p],  %[u], 1f\n"		\
+ 		"	add            %[rc], %[p], %[a]\n"		\
+-		"	sc." sfx ".rl  %[rc], %[rc], %[c]\n"		\
+-		"	bnez           %[rc], 0b\n"			\
++		"	s" sfx "       %[rc], %[c]\n"			\
+ 		"	fence          rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+@@ -237,11 +236,10 @@ static __always_inline s64 arch_atomic64_fetch_add_unless(atomic64_t *v, s64 a,
+ #define _arch_atomic_inc_unless_negative(_prev, _rc, counter, sfx)	\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "      %[p],  %[c]\n"			\
++		"0:	l" sfx "        %[p],  %[c]\n"			\
+ 		"	bltz            %[p],  1f\n"			\
+ 		"	addi            %[rc], %[p], 1\n"		\
+-		"	sc." sfx ".rl   %[rc], %[rc], %[c]\n"		\
+-		"	bnez            %[rc], 0b\n"			\
++		"	s" sfx "        %[rc], %[c]\n"			\
+ 		"	fence           rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+@@ -263,11 +261,10 @@ static __always_inline bool arch_atomic_inc_unless_negative(atomic_t *v)
+ #define _arch_atomic_dec_unless_positive(_prev, _rc, counter, sfx)	\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "      %[p],  %[c]\n"			\
++		"0:	l" sfx "        %[p],  %[c]\n"			\
+ 		"	bgtz            %[p],  1f\n"			\
+ 		"	addi            %[rc], %[p], -1\n"		\
+-		"	sc." sfx ".rl   %[rc], %[rc], %[c]\n"		\
+-		"	bnez            %[rc], 0b\n"			\
++		"	s" sfx "        %[rc], %[c]\n"			\
+ 		"	fence           rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+@@ -289,11 +286,10 @@ static __always_inline bool arch_atomic_dec_unless_positive(atomic_t *v)
+ #define _arch_atomic_dec_if_positive(_prev, _rc, counter, sfx)		\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "     %[p],  %[c]\n"			\
++		"0:	l" sfx "       %[p],  %[c]\n"			\
+ 		"	addi           %[rc], %[p], -1\n"		\
+ 		"	bltz           %[rc], 1f\n"			\
+-		"	sc." sfx ".rl  %[rc], %[rc], %[c]\n"		\
+-		"	bnez           %[rc], 0b\n"			\
++		"	s" sfx "       %[rc], %[c]\n"			\
+ 		"	fence          rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+diff --git a/arch/riscv/include/asm/cmpxchg.h b/arch/riscv/include/asm/cmpxchg.h
+index 808b4c78462e..34f1e29ec8e7 100644
+--- a/arch/riscv/include/asm/cmpxchg.h
++++ b/arch/riscv/include/asm/cmpxchg.h
+@@ -22,11 +22,10 @@
+ 									\
+ 	__asm__ __volatile__ (						\
+ 	       prepend							\
+-	       "0:	lr.w %0, %2\n"					\
++	       "0:	lw   %0, %2\n"					\
+ 	       "	and  %1, %0, %z4\n"				\
+ 	       "	or   %1, %1, %z3\n"				\
+-	       "	sc.w" sc_sfx " %1, %1, %2\n"			\
+-	       "	bnez %1, 0b\n"					\
++	       "	sw   %1, %1, %2\n"				\
+ 	       append							\
+ 	       : "=&r" (__retx), "=&r" (__rc), "+A" (*(__ptr32b))	\
+ 	       : "rJ" (__newx), "rJ" (~__mask)				\
+@@ -117,13 +116,12 @@
+ 									\
+ 	__asm__ __volatile__ (						\
+ 		prepend							\
+-		"0:	lr.w %0, %2\n"					\
++		"0:	lw   %0, %2\n"					\
+ 		"	and  %1, %0, %z5\n"				\
+ 		"	bne  %1, %z3, 1f\n"				\
+ 		"	and  %1, %0, %z6\n"				\
+ 		"	or   %1, %1, %z4\n"				\
+-		"	sc.w" sc_sfx " %1, %1, %2\n"			\
+-		"	bnez %1, 0b\n"					\
++		"	sw   %1, %2\n"					\
+ 		append							\
+ 		"1:\n"							\
+ 		: "=&r" (__retx), "=&r" (__rc), "+A" (*(__ptr32b))	\
+@@ -140,10 +138,9 @@
+ 									\
+ 	__asm__ __volatile__ (						\
+ 		prepend							\
+-		"0:	lr" lr_sfx " %0, %2\n"				\
++		"0:	l" lr_sfx " %0, %2\n"				\
+ 		"	bne  %0, %z3, 1f\n"				\
+-		"	sc" sc_sfx " %1, %z4, %2\n"			\
+-		"	bnez %1, 0b\n"					\
++		"	s" sc_sfx " %z4, %2\n"				\
+ 		append							\
+ 		"1:\n"							\
+ 		: "=&r" (r), "=&r" (__rc), "+A" (*(p))			\
+@@ -165,11 +162,11 @@
+ 					__ret, __ptr, __old, __new);	\
+ 		break;							\
+ 	case 4:								\
+-		__arch_cmpxchg(".w", ".w" sc_sfx, prepend, append,	\
++		__arch_cmpxchg("w", "w", prepend, append,	\
+ 				__ret, __ptr, (long), __old, __new);	\
+ 		break;							\
+ 	case 8:								\
+-		__arch_cmpxchg(".d", ".d" sc_sfx, prepend, append,	\
++		__arch_cmpxchg("d", "d", prepend, append,	\
+ 				__ret, __ptr, /**/, __old, __new);	\
+ 		break;							\
+ 	default:							\
+diff --git a/arch/riscv/include/asm/futex.h b/arch/riscv/include/asm/futex.h
+index fc8130f995c1..efef8d1bd20f 100644
+--- a/arch/riscv/include/asm/futex.h
++++ b/arch/riscv/include/asm/futex.h
+@@ -85,10 +85,9 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
+ 
+ 	__enable_user_access();
+ 	__asm__ __volatile__ (
+-	"1:	lr.w.aqrl %[v],%[u]			\n"
++	"1:	lw %[v],%[u]				\n"
+ 	"	bne %[v],%z[ov],3f			\n"
+-	"2:	sc.w.aqrl %[t],%z[nv],%[u]		\n"
+-	"	bnez %[t],1b				\n"
++	"2:	sw %z[nv],%[u]			\n"
+ 	"3:						\n"
+ 		_ASM_EXTABLE_UACCESS_ERR(1b, 3b, %[r])	\
+ 		_ASM_EXTABLE_UACCESS_ERR(2b, 3b, %[r])	\
+diff --git a/arch/riscv/kernel/entry.S b/arch/riscv/kernel/entry.S
+index 68a24cf9481a..49b53e3775d3 100644
+--- a/arch/riscv/kernel/entry.S
++++ b/arch/riscv/kernel/entry.S
+@@ -166,7 +166,7 @@ SYM_CODE_START_NOALIGN(ret_from_exception)
+ 	 * arbitrarily large.
+ 	 */
+ 	REG_L  a2, PT_EPC(sp)
+-	REG_SC x0, a2, PT_EPC(sp)
++	REG_S  a2, PT_EPC(sp)
+ 
+ 	csrw CSR_STATUS, a0
+ 	csrw CSR_EPC, a2
+diff --git a/arch/riscv/kernel/traps.c b/arch/riscv/kernel/traps.c
+index 05a16b1f0aee..a3fefd7948e3 100644
+--- a/arch/riscv/kernel/traps.c
++++ b/arch/riscv/kernel/traps.c
+@@ -33,6 +33,50 @@
+ #include <asm/vector.h>
+ #include <asm/irq_stack.h>
+ 
++static inline unsigned long* regs_get_register_p(struct pt_regs *regs,
++					      unsigned int offset)
++{
++	static unsigned long zero = 0;
++	if (offset == 0)
++		return &zero;
++	return &(((unsigned long*)regs)[offset]);
++}
++
++static void do_atomic(struct pt_regs *regs){
++	uint32_t op = *(uint32_t*)regs->epc;
++	uint32_t irmid = (op>>27)&0x1f;
++	unsigned long rs1 = *regs_get_register_p(regs,(op >> 15) & 0x1f);
++	unsigned long rs2 = *regs_get_register_p(regs,(op >> 20) & 0x1f);
++	unsigned long* rsd = regs_get_register_p(regs,(op >> 7) & 0x1f);
++	unsigned long* dst = (unsigned long*)rs1;
++	if((op >> 7) & 0x1f)
++		*rsd = *dst;
++	switch( irmid ){
++		case 0b00010: break; //LR.W
++		case 0b00011: {
++			if((op >> 7) & 0x1f)
++				*rsd = 0;
++			*dst = rs2;
++			break; //SC.W (Lie and always say it's good)
++		}
++		case 0b00001: *dst = rs2; break; //AMOSWAP.W
++		case 0b00000: *dst += rs2; break; //AMOADD.W
++		case 0b00100: *dst ^= rs2; break; //AMOXOR.W
++		case 0b01100: *dst &= rs2; break; //AMOAND.W
++		case 0b01000: *dst |= rs2; break; //AMOOR.W
++		default: break;
++	}
++
++}
++
++static int do_exinsn(struct pt_regs *regs){
++	uint32_t op = *(uint32_t*)regs->epc;
++	switch (op & 0x7f) {
++		case 0b0101111: do_atomic(regs); return 1;
++		default: return 0;
++	}
++}
++
+ int show_unhandled_signals = 1;
+ 
+ static DEFINE_SPINLOCK(die_lock);
+@@ -136,6 +180,14 @@ static void do_trap_error(struct pt_regs *regs, int signo, int code,
+ 	if (user_mode(regs)) {
+ 		do_trap(regs, signo, code, addr);
+ 	} else {
++		/* If illegal instruction and we can emulate, then
++		 * we need to emulate and skip the instruction.
++		 */
++		if(code == SEGV_ACCERR && do_exinsn(regs)){
++			regs->epc += 4;
++			regs->badaddr += 4;
++			return;
++		}
+ 		if (!fixup_exception(regs))
+ 			die(regs, str);
+ 	}
+-- 
+2.45.2
+
