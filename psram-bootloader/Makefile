@@ -1,4 +1,4 @@
-.PHONY: all clean flash picotool demo flash-demo
+.PHONY: all clean flash picotool demo flash-demo flash-kernel
 
 all: build/Makefile
 	@$(MAKE) -C build
@@ -40,6 +40,10 @@ demo: | build
 flash-demo: demo flash
 	sleep 2
 	@$(MAKE) picotool PICOTOOL_ARGS="load -fxup 0 build/demo.bin"
+
+flash-kernel: ../buildroot/output/images/flash-image.bin flash
+	sleep 3
+	@$(MAKE) picotool PICOTOOL_ARGS="load -fxup 0 ../buildroot/output/images/flash-image.bin"
 
 clean:
 	@$(MAKE) -C demo clean

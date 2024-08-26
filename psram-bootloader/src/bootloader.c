@@ -84,8 +84,6 @@ int main() {
 	void *data_addr, *ram_addr = (void *)PSRAM_LOCATION;
 
 	stdio_init_all();
-	wait_for_input("Waiting for input\r");
-
 
 	ret = psram_setup_and_test();
 	if (ret) {
