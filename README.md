@@ -15,5 +15,9 @@ make BR2_EXTERNAL=$PWD/../ raspberrypi-pico2_defconfig
 
 make
 
-sudo dd status=progress oflag=sync bs=4k if=output/images/sdcard.img of=/dev/sdX; sync
+cd ../psram-bootloader
+
+make flash-kernel
 ```
+
+## Designed to work with [SparkFun Pro Micro - RP2350](https://www.sparkfun.com/products/24870)
