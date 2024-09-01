@@ -271,8 +271,6 @@ static void hexdump(const void *data, size_t size) {
 
 static size_t __no_inline_not_in_flash_func(setup_psram)(uint psram_cs_pin)
 {
-	if (!psram_cs_pin)
-		return 0;
 	gpio_set_function(psram_cs_pin, GPIO_FUNC_XIP_CS1);
 
 	size_t psram_size = 0;
