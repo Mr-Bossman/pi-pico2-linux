@@ -73,13 +73,11 @@
 			#interrupt-cells = <0x01>;
 		};
 
-		/*
 		clint: clint@d0000000 {
 			interrupts-extended = <&cpu0_intc 3>,
 					      <&cpu0_intc 7>;
 			reg = <0xd0000000 0x400>;
 			compatible = "riscv,clint0";
 		};
-		*/
 	};
 };
