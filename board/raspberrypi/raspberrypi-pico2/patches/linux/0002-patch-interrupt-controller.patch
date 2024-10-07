@@ -1,0 +1,19 @@
+diff -urN a/drivers/irqchip/irq-simple-intc.c b/drivers/irqchip/irq-simple-intc.c
+--- a/drivers/irqchip/irq-simple-intc.c
++++ b/drivers/irqchip/irq-simple-intc.c
+@@ -22,6 +22,7 @@
+ 
+ #define MAX_IRQ_NUM	512
+ 
++#define CSR_MEICONTEXT 0xbe5
+ #define CSR_MEINEXT 0xbe4
+ #define CSR_MEIEA 0xbe0
+ 
+@@ -85,6 +86,7 @@
+ 	generic_handle_domain_irq(irqc->domain, hwirq);
+ 
+ 	chained_irq_exit(chip, desc);
++	csr_write(CSR_MEICONTEXT, 0x00);
+ }
+ 
+ static int __init simple_intc_init(struct device_node *intc,
