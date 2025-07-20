@@ -1,0 +1,4 @@
+config BR2_PACKAGE_NEWLIB
+    bool "newlib"
+    help
+      Newlib

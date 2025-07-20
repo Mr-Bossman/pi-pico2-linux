@@ -15,7 +15,7 @@ make -C buildroot BR2_EXTERNAL=$PWD/ raspberrypi-pico2_defconfig
 
 make -C buildroot
 
-make -C psram-bootloader flash-kernel
+make -C psram-bootloader flash-br2
 ```
 
 ## Designed to work with [SparkFun Pro Micro - RP2350](https://www.sparkfun.com/products/24870)

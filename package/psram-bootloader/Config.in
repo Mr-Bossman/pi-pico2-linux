@@ -1,0 +1,14 @@
+comment "psram-bootloader needs a toolchain w/ C++"
+	depends on !BR2_INSTALL_LIBSTDCPP
+
+config BR2_PACKAGE_PSRAM_BOOTLOADER
+	bool "psram-bootloader"
+	depends on BR2_LINUX_KERNEL
+	depends on BR2_LINUX_KERNEL_IMAGE
+	depends on BR2_INSTALL_LIBSTDCPP
+	select BR2_PACKAGE_NEWLIB
+	select BR2_PACKAGE_HOST_CMAKE
+	select BR2_PACKAGE_PICO_SDK2
+	help
+	  psram-bootloader boot linux on Raspberry Pi Pico 2
+	  from PSRAM.

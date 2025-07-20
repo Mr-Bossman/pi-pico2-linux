@@ -1,0 +1,7 @@
+source "$BR2_EXTERNAL_RPI_PICO2_PATH/package/psram-bootloader/Config.in"
+source "$BR2_EXTERNAL_RPI_PICO2_PATH/package/libusb/Config.in.host"
+source "$BR2_EXTERNAL_RPI_PICO2_PATH/package/pico-sdk2/Config.in"
+source "$BR2_EXTERNAL_RPI_PICO2_PATH/package/pico-sdk2/Config.in.host"
+source "$BR2_EXTERNAL_RPI_PICO2_PATH/package/picotool2/Config.in"
+source "$BR2_EXTERNAL_RPI_PICO2_PATH/package/picotool2/Config.in.host"
+source "$BR2_EXTERNAL_RPI_PICO2_PATH/package/newlib/Config.in"

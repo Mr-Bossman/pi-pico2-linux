@@ -1,4 +1,4 @@
-.PHONY: all clean flash picotool demo flash-demo flash-kernel
+.PHONY: all clean flash picotool demo flash-demo flash-kernel flash-br2
 
 all: build/Makefile
 	@$(MAKE) -C build
@@ -42,6 +42,11 @@ flash-demo: demo flash
 	@$(MAKE) picotool PICOTOOL_ARGS="load -fxup 0 build/demo.bin"
 
 flash-kernel: ../buildroot/output/images/flash-image.bin flash
+	sleep 3
+	@$(MAKE) picotool PICOTOOL_ARGS="load -fxup 0 ../buildroot/output/images/flash-image.bin"
+
+flash-br2: ../buildroot/output/images/flash-image.bin ../buildroot/output/images/psram-bootloader.uf2
+	@$(MAKE) picotool PICOTOOL_ARGS="load -fu ../buildroot/output/images/psram-bootloader.uf2"
 	sleep 3
 	@$(MAKE) picotool PICOTOOL_ARGS="load -fxup 0 ../buildroot/output/images/flash-image.bin"
 
