@@ -25,7 +25,6 @@ endif()
 # ====================================================================================
 
 set(PICO_PLATFORM rp2350-riscv CACHE STRING "Pico Platform")
-set(PICO_COMPILER pico_riscv_gcc_zcb_zcmp)
 
 set(PICO_BOARD sparkfun_promicro_rp2350 CACHE STRING "Board type")
 

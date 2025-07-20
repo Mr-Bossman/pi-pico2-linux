@@ -1,0 +1,178 @@
+From 4d08cc516b5e910cefad6768dc80a19ac72e5148 Mon Sep 17 00:00:00 2001
+From: Jesse Taube <Mr.Bossman075@gmail.com>
+Date: Sat, 10 May 2025 19:31:26 -0400
+Subject: [PATCH] replace sc and lr attomics with sw and lw as they hang
+ the rp2350
+
+---
+ arch/riscv/include/asm/atomic.h  | 20 ++++++++------------
+ arch/riscv/include/asm/cmpxchg.h | 21 +++++++++------------
+ arch/riscv/include/asm/futex.h   |  5 ++---
+ arch/riscv/kernel/entry.S        |  2 +-
+ 4 files changed, 20 insertions(+), 28 deletions(-)
+
+diff --git a/arch/riscv/include/asm/atomic.h b/arch/riscv/include/asm/atomic.h
+index 5b96c2f61adb..b2391c62d718 100644
+--- a/arch/riscv/include/asm/atomic.h
++++ b/arch/riscv/include/asm/atomic.h
+@@ -198,11 +198,10 @@ ATOMIC_OPS(xor, xor, i)
+ #define _arch_atomic_fetch_add_unless(_prev, _rc, counter, _a, _u, sfx)	\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "     %[p],  %[c]\n"			\
++		"0:	l" sfx "       %[p],  %[c]\n"			\
+ 		"	beq	       %[p],  %[u], 1f\n"		\
+ 		"	add            %[rc], %[p], %[a]\n"		\
+-		"	sc." sfx ".rl  %[rc], %[rc], %[c]\n"		\
+-		"	bnez           %[rc], 0b\n"			\
++		"	s" sfx "       %[rc], %[c]\n"			\
+ 		"	fence          rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+@@ -237,11 +236,10 @@ static __always_inline s64 arch_atomic64_fetch_add_unless(atomic64_t *v, s64 a,
+ #define _arch_atomic_inc_unless_negative(_prev, _rc, counter, sfx)	\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "      %[p],  %[c]\n"			\
++		"0:	l" sfx "        %[p],  %[c]\n"			\
+ 		"	bltz            %[p],  1f\n"			\
+ 		"	addi            %[rc], %[p], 1\n"		\
+-		"	sc." sfx ".rl   %[rc], %[rc], %[c]\n"		\
+-		"	bnez            %[rc], 0b\n"			\
++		"	s" sfx "        %[rc], %[c]\n"			\
+ 		"	fence           rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+@@ -263,11 +261,10 @@ static __always_inline bool arch_atomic_inc_unless_negative(atomic_t *v)
+ #define _arch_atomic_dec_unless_positive(_prev, _rc, counter, sfx)	\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "      %[p],  %[c]\n"			\
++		"0:	l" sfx "        %[p],  %[c]\n"			\
+ 		"	bgtz            %[p],  1f\n"			\
+ 		"	addi            %[rc], %[p], -1\n"		\
+-		"	sc." sfx ".rl   %[rc], %[rc], %[c]\n"		\
+-		"	bnez            %[rc], 0b\n"			\
++		"	s" sfx "        %[rc], %[c]\n"			\
+ 		"	fence           rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+@@ -289,11 +286,10 @@ static __always_inline bool arch_atomic_dec_unless_positive(atomic_t *v)
+ #define _arch_atomic_dec_if_positive(_prev, _rc, counter, sfx)		\
+ ({									\
+ 	__asm__ __volatile__ (						\
+-		"0:	lr." sfx "     %[p],  %[c]\n"			\
++		"0:	l" sfx "       %[p],  %[c]\n"			\
+ 		"	addi           %[rc], %[p], -1\n"		\
+ 		"	bltz           %[rc], 1f\n"			\
+-		"	sc." sfx ".rl  %[rc], %[rc], %[c]\n"		\
+-		"	bnez           %[rc], 0b\n"			\
++		"	s" sfx "       %[rc], %[c]\n"			\
+ 		"	fence          rw, rw\n"			\
+ 		"1:\n"							\
+ 		: [p]"=&r" (_prev), [rc]"=&r" (_rc), [c]"+A" (counter)	\
+diff --git a/arch/riscv/include/asm/cmpxchg.h b/arch/riscv/include/asm/cmpxchg.h
+index 2ec119eb147b..5a5950b57762 100644
+--- a/arch/riscv/include/asm/cmpxchg.h
++++ b/arch/riscv/include/asm/cmpxchg.h
+@@ -37,11 +37,10 @@
+ 										\
+ 		__asm__ __volatile__ (						\
+ 		       prepend							\
+-		       "0:	lr.w %0, %2\n"					\
++		       "0:	lw %0, %2\n"					\
+ 		       "	and  %1, %0, %z4\n"				\
+ 		       "	or   %1, %1, %z3\n"				\
+-		       "	sc.w" sc_sfx " %1, %1, %2\n"			\
+-		       "	bnez %1, 0b\n"					\
++		       "	s" sc_sfx " %1, %1, %2\n"			\
+ 		       sc_append						\
+ 		       : "=&r" (__retx), "=&r" (__rc), "+A" (*(__ptr32b))	\
+ 		       : "rJ" (__newx), "rJ" (~__mask)				\
+@@ -154,13 +153,12 @@
+ 										\
+ 		__asm__ __volatile__ (						\
+ 			sc_prepend							\
+-			"0:	lr.w %0, %2\n"					\
++			"0:	lw %0, %2\n"					\
+ 			"	and  %1, %0, %z5\n"				\
+ 			"	bne  %1, %z3, 1f\n"				\
+ 			"	and  %1, %0, %z6\n"				\
+ 			"	or   %1, %1, %z4\n"				\
+-			"	sc.w" sc_sfx " %1, %1, %2\n"			\
+-			"	bnez %1, 0b\n"					\
++			"	s" sc_sfx " %1, %1, %2\n"			\
+ 			sc_append							\
+ 			"1:\n"							\
+ 			: "=&r" (__retx), "=&r" (__rc), "+A" (*(__ptr32b))	\
+@@ -193,10 +191,9 @@
+ 									\
+ 		__asm__ __volatile__ (					\
+ 			sc_prepend					\
+-			"0:	lr" lr_sfx " %0, %2\n"			\
++			"0:	l" lr_sfx " %0, %2\n"			\
+ 			"	bne  %0, %z3, 1f\n"			\
+-			"	sc" sc_sfx " %1, %z4, %2\n"		\
+-			"	bnez %1, 0b\n"				\
++			"	s" sc_sfx " %z4, %2\n"		\
+ 			sc_append					\
+ 			"1:\n"						\
+ 			: "=&r" (r), "=&r" (__rc), "+A" (*(p))		\
+@@ -228,13 +225,13 @@
+ 				      __ret, __ptr, __old, __new);	\
+ 		break;							\
+ 	case 4:								\
+-		__arch_cmpxchg(".w", ".w" sc_sfx, ".w" cas_sfx,		\
++		__arch_cmpxchg("w", "w" sc_sfx, ".w" cas_sfx,		\
+ 			       sc_prepend, sc_append,			\
+ 			       cas_prepend, cas_append,			\
+ 			       __ret, __ptr, (long)(int)(long), __old, __new);	\
+ 		break;							\
+ 	case 8:								\
+-		__arch_cmpxchg(".d", ".d" sc_sfx, ".d" cas_sfx,		\
++		__arch_cmpxchg("d", "d" sc_sfx, ".d" cas_sfx,		\
+ 			       sc_prepend, sc_append,			\
+ 			       cas_prepend, cas_append,			\
+ 			       __ret, __ptr, /**/, __old, __new);	\
+@@ -276,7 +273,7 @@
+ 
+ #define arch_cmpxchg(ptr, o, n)						\
+ 	_arch_cmpxchg((ptr), (o), (n),					\
+-		      SC_SFX(".rl"), CAS_SFX(".aqrl"),			\
++		      SC_SFX(""), CAS_SFX(".aqrl"),			\
+ 		      SC_PREPEND(""), SC_APPEND(RISCV_FULL_BARRIER),	\
+ 		      CAS_PREPEND(""), CAS_APPEND(""))
+ 
+diff --git a/arch/riscv/include/asm/futex.h b/arch/riscv/include/asm/futex.h
+index 90c86b115e00..ffaab41718e7 100644
+--- a/arch/riscv/include/asm/futex.h
++++ b/arch/riscv/include/asm/futex.h
+@@ -85,10 +85,9 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
+ 
+ 	__enable_user_access();
+ 	__asm__ __volatile__ (
+-	"1:	lr.w %[v],%[u]			        \n"
++	"1:	lw %[v],%[u]				\n"
+ 	"	bne %[v],%z[ov],3f			\n"
+-	"2:	sc.w.aqrl %[t],%z[nv],%[u]		\n"
+-	"	bnez %[t],1b				\n"
++	"2:	sw %z[nv],%[u]				\n"
+ 	"3:						\n"
+ 		_ASM_EXTABLE_UACCESS_ERR(1b, 3b, %[r])	\
+ 		_ASM_EXTABLE_UACCESS_ERR(2b, 3b, %[r])	\
+diff --git a/arch/riscv/kernel/entry.S b/arch/riscv/kernel/entry.S
+index 33a5a9f2a0d4..fc2b4b2a7056 100644
+--- a/arch/riscv/kernel/entry.S
++++ b/arch/riscv/kernel/entry.S
+@@ -260,7 +260,7 @@ SYM_CODE_START_NOALIGN(ret_from_exception)
+ 	 * arbitrarily large.
+ 	 */
+ 	REG_L  a2, PT_EPC(sp)
+-	REG_SC x0, a2, PT_EPC(sp)
++	REG_S  a2, PT_EPC(sp)
+ 
+ 	csrw CSR_STATUS, a0
+ 	csrw CSR_EPC, a2
+-- 
+2.49.0
+

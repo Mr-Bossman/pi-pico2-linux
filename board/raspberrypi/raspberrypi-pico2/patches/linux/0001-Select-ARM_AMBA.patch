@@ -1,0 +1,24 @@
+From 531585dd741710ba96567d341e9b9bd10073c189 Mon Sep 17 00:00:00 2001
+From: Jesse Taube <Mr.Bossman075@gmail.com>
+Date: Sat, 10 May 2025 19:29:44 -0400
+Subject: [PATCH] Select ARM_AMBA
+
+---
+ arch/riscv/Kconfig.socs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/riscv/Kconfig.socs b/arch/riscv/Kconfig.socs
+index 8b503e54fa1b..c6af9d52eae5 100644
+--- a/arch/riscv/Kconfig.socs
++++ b/arch/riscv/Kconfig.socs
+@@ -67,6 +67,7 @@ config ARCH_VIRT
+ 	select PM_GENERIC_DOMAINS if PM
+ 	select PM_GENERIC_DOMAINS_OF if PM && OF
+ 	select RISCV_SBI_CPUIDLE if CPU_IDLE && RISCV_SBI
++        select ARM_AMBA
+ 	help
+ 	  This enables support for QEMU Virt Machine.
+ 
+-- 
+2.49.0
+

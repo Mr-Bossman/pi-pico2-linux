@@ -1,22 +1,22 @@
-From afd7222c20d0371d359006dc2adecdf8339037ca Mon Sep 17 00:00:00 2001
+From 3ce9a86ada9c0352a73d4e7e15fe81c031b5b03c Mon Sep 17 00:00:00 2001
 From: Jesse Taube <jesse@rivosinc.com>
 Date: Sun, 8 Sep 2024 02:01:20 -0400
 Subject: [PATCH] Add interrupt controller
 
 ---
- drivers/irqchip/Kconfig           |   8 ++
+ drivers/irqchip/Kconfig           |   6 ++
  drivers/irqchip/Makefile          |   1 +
  drivers/irqchip/irq-simple-intc.c | 137 ++++++++++++++++++++++++++++++
- 3 files changed, 146 insertions(+)
+ 3 files changed, 144 insertions(+)
  create mode 100644 drivers/irqchip/irq-simple-intc.c
 
 diff --git a/drivers/irqchip/Kconfig b/drivers/irqchip/Kconfig
-index 14464716bacb..5cc76fe2ee89 100644
+index 08bb3b031f23..c730d11fe07c 100644
 --- a/drivers/irqchip/Kconfig
 +++ b/drivers/irqchip/Kconfig
-@@ -582,6 +582,14 @@ config STARFIVE_JH8100_INTC
- 
- 	  If you don't know what to do here, say Y.
+@@ -639,6 +639,12 @@ config THEAD_C900_ACLINT_SSWI
+ 	  This enables support for T-HEAD specific ACLINT SSWI device
+ 	  support.
  
 +config SIMPLE_INTC
 +	bool "Simple External Interrupt Controller"
@@ -24,18 +24,16 @@ index 14464716bacb..5cc76fe2ee89 100644
 +	help
 +	  This enables support for a simple INTC chip.
 +
-+	  If you don't know what to do here, say Y.
-+
+ 	  If you don't know what to do here, say Y.
+ 
  config EXYNOS_IRQ_COMBINER
- 	bool "Samsung Exynos IRQ combiner support" if COMPILE_TEST
- 	depends on (ARCH_EXYNOS && ARM) || COMPILE_TEST
 diff --git a/drivers/irqchip/Makefile b/drivers/irqchip/Makefile
-index d9dc3d99aaa8..cc92ff458331 100644
+index 365bcea9a61f..35af9b29d8ef 100644
 --- a/drivers/irqchip/Makefile
 +++ b/drivers/irqchip/Makefile
-@@ -124,3 +124,4 @@ obj-$(CONFIG_IRQ_IDT3243X)		+= irq-idt3243x.o
- obj-$(CONFIG_APPLE_AIC)			+= irq-apple-aic.o
+@@ -131,3 +131,4 @@ obj-$(CONFIG_APPLE_AIC)			+= irq-apple-aic.o
  obj-$(CONFIG_MCHP_EIC)			+= irq-mchp-eic.o
+ obj-$(CONFIG_SOPHGO_SG2042_MSI)		+= irq-sg2042-msi.o
  obj-$(CONFIG_SUNPLUS_SP7021_INTC)	+= irq-sp7021-intc.o
 +obj-$(CONFIG_SIMPLE_INTC)		+= irq-simple-intc.o
 diff --git a/drivers/irqchip/irq-simple-intc.c b/drivers/irqchip/irq-simple-intc.c
@@ -182,5 +180,5 @@ index 000000000000..ebd3c8e6dd02
 +MODULE_LICENSE("GPL");
 +MODULE_AUTHOR("Jesse Taube <Mr.Bossman075@gmail.com>");
 -- 
-2.45.2
+2.49.0
 

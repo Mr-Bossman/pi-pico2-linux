@@ -1,4 +1,4 @@
-From 690a3eec78fa36bec207845ab6787e802d2cdab3 Mon Sep 17 00:00:00 2001
+From ed5526a20b4644cb060c941b2ee17891ed270391 Mon Sep 17 00:00:00 2001
 From: Jesse Taube <jesse@rivosinc.com>
 Date: Fri, 6 Sep 2024 20:32:13 -0400
 Subject: [PATCH] timer
@@ -25,5 +25,5 @@ index 0bdd9d7ec545..aab46f2ce27f 100644
  /* CLINT manages IPI and Timer for RISC-V M-mode  */
  static u32 __iomem *clint_ipi_base;
 -- 
-2.45.2
+2.49.0
 

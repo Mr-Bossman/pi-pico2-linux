@@ -1,6 +1,16 @@
-diff --color -urN a/drivers/irqchip/irq-simple-intc.c b/drivers/irqchip/irq-simple-intc.c
---- a/drivers/irqchip/irq-simple-intc.c	2024-10-10 13:30:53.202884121 +0000
-+++ b/drivers/irqchip/irq-simple-intc.c	2024-10-10 13:52:17.643680867 +0000
+From 866fc552e3f29eed3204813b243ea46df406ebd0 Mon Sep 17 00:00:00 2001
+From: Carsten Thiele <software@carsten-thiele.de>
+Date: Sat, 10 May 2025 19:23:09 -0400
+Subject: [PATCH] patch interrupt controller
+
+---
+ drivers/irqchip/irq-simple-intc.c | 26 ++++++++++++++++++++++----
+ 1 file changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/irqchip/irq-simple-intc.c b/drivers/irqchip/irq-simple-intc.c
+index ebd3c8e6dd02..654750265e70 100644
+--- a/drivers/irqchip/irq-simple-intc.c
++++ b/drivers/irqchip/irq-simple-intc.c
 @@ -22,6 +22,7 @@
  
  #define MAX_IRQ_NUM	512
@@ -9,7 +19,7 @@ diff --color -urN a/drivers/irqchip/irq-simple-intc.c b/drivers/irqchip/irq-simp
  #define CSR_MEINEXT 0xbe4
  #define CSR_MEIEA 0xbe0
  
-@@ -49,6 +50,7 @@
+@@ -49,6 +50,7 @@ static void simple_intc_mask(struct irq_data *d)
  	uint32_t mask = BIT(d->hwirq % 16);
  
  	raw_spin_lock(&irqc->lock);
@@ -17,28 +27,28 @@ diff --color -urN a/drivers/irqchip/irq-simple-intc.c b/drivers/irqchip/irq-simp
  	csr_clear(CSR_MEIEA, index | (mask << 16));
  	raw_spin_unlock(&irqc->lock);
  }
-@@ -78,13 +80,29 @@
+@@ -78,13 +80,29 @@ static void simple_intc_irq_handler(struct irq_desc *desc)
  	struct simple_irq_chip *irqc = irq_data_get_irq_handler_data(&desc->irq_data);
  	struct irq_chip *chip = irq_desc_get_chip(desc);
  	int hwirq;
 +	int meicontext;
-+	
-+	meicontext = csr_read_set(CSR_MEICONTEXT,0x02); // save the meicontext register and disable parent interrupts
  
- 	chained_irq_enter(chip, desc);
+-	chained_irq_enter(chip, desc);
 -	hwirq = (csr_read_set(CSR_MEINEXT, 0x1) >> 2) & 0x1ff;
 -
 -	generic_handle_domain_irq(irqc->domain, hwirq);
--
++	meicontext = csr_read_set(CSR_MEICONTEXT,0x02); // save the meicontext register and disable parent interrupts
+ 
++	chained_irq_enter(chip, desc);
 +	while ((hwirq = csr_read(CSR_MEINEXT)) >= 0) {
 +		hwirq = ((hwirq) >> 2) & 0x1ff;
 +		generic_handle_domain_irq(irqc->domain, hwirq);
 +	}
  	chained_irq_exit(chip, desc);
-+	
++
 +	// to restore the 3-level preemtion-stack the following should work:
 +	//
-+	// csr_write(CSR_MEICONTEXT, meicontext); 
++	// csr_write(CSR_MEICONTEXT, meicontext);
 +	//
 +	// but it doesn't work always, so we have to do a workaround for now to restore the preemption stack
 +	// something between here and the mret instruction clears bit 0 of the meicontext register
@@ -51,3 +61,6 @@ diff --color -urN a/drivers/irqchip/irq-simple-intc.c b/drivers/irqchip/irq-simp
  }
  
  static int __init simple_intc_init(struct device_node *intc,
+-- 
+2.49.0
+
