@@ -15,6 +15,9 @@ BR2_OPTIMIZE_S=y
 BR2_TARGET_ROOTFS_INITRAMFS=y
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/rootfs_overlay"
 
+# Busybox
+BR2_PACKAGE_BUSYBOX_CONFIG="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/busybox.config"
+
 # Bootloader
 BR2_PACKAGE_PICO2_BOOTLOADER=y
 
@@ -29,8 +32,8 @@ BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_15=y
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.15"
-BR2_LINUX_KERNEL_DEFCONFIG="rv32_nommu_virt"
-BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/raspberrypi-pico2.config"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/raspberrypi-pico2_defconfig"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_CUSTOM_DTS_DIR="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/dts/"
 
