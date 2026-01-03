@@ -11,7 +11,7 @@
 	"partitions": [
 	  {
 	    "name": "LINUX",
-	    "id": 0,
+	    "id": 1,
 	    "__comment__0_": "Start should be moved to avoid conflict with program memory",
 	    "start": "64K",
 	    "__comment__1_": "Size should be the size of kernel",
