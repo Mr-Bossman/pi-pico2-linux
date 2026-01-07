@@ -1,16 +1,25 @@
 FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates patch git make binutils gcc file wget cpio unzip rsync bc bzip2 g++ && \
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates patch git \
+	make binutils gcc file wget cpio unzip rsync bc bzip2 g++ && \
 	rm -rf /var/lib/apt/lists/* && \
 	apt-get clean
 
-RUN git clone --recurse-submodules https://github.com/Mr-Bossman/pi-pico2-linux
+ARG BRANCH="master"
+RUN git clone --recurse-submodules --single-branch --depth 1 -b ${BRANCH} \
+	https://github.com/Mr-Bossman/pi-pico2-linux
 
 WORKDIR pi-pico2-linux
+
+ARG THREADS=1
 RUN make -C buildroot BR2_EXTERNAL=$PWD/ raspberrypi-pico2_defconfig && \
-	make -C buildroot
+	make -C buildroot -j${THREADS}
 
 CMD picotool load -fu buildroot/output/images/flash-image.uf2
 
-# docker build -t pi-pico2-linux .
-# docker run -v $(pwd):/root/ -it --entrypoint /bin/bash pi-pico2-linux
+# To build binary:
+# docker build --build-arg THREADS=1 -t pi-pico2-linux .
+# To flash the pico2:
 # docker run pi-pico2-linux
+# To copy built files in/out of the container:
+# docker run -v $(pwd):/root/ -it --entrypoint /bin/bash pi-pico2-linux
