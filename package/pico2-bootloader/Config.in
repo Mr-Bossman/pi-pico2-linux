@@ -1,0 +1,5 @@
+config BR2_PACKAGE_PICO2_BOOTLOADER
+	bool "raspberry pi pico 2 bootloader"
+	help
+		Custom bootloader for raspberry pi pico 2
+		to load linux.

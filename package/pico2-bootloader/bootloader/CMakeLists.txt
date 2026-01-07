@@ -42,9 +42,17 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
+add_compile_definitions(PICO_SDK)
+
+include_directories(psram-bootloader
+	src
+)
+
 add_executable(psram-bootloader
-    src/bootloader.c
-    )
+	src/main.c
+	src/image.c
+	src/qmi.c
+)
 
 # pull in common dependencies
 target_link_libraries(psram-bootloader pico_stdlib)
@@ -52,12 +60,7 @@ target_link_libraries(psram-bootloader pico_stdlib)
 pico_enable_stdio_usb(psram-bootloader 1)
 pico_enable_stdio_uart(psram-bootloader 1)
 
-# add partition table
-pico_embed_pt_in_binary(psram-bootloader ${CMAKE_CURRENT_LIST_DIR}/partition_table.json)
-
-# create absolute uf2, and package in flash
-pico_set_uf2_family(psram-bootloader "absolute")
-pico_package_uf2_output(psram-bootloader 0x10000000)
+pico_set_binary_type(psram-bootloader copy_to_ram)
 
 # create map/bin/hex file etc.
 pico_add_extra_outputs(psram-bootloader)

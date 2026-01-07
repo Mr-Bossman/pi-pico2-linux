@@ -1,2 +1,4 @@
-psram-bootloader/build
-psram-bootloader/demo/build
+package/pico2-bootloader/bootloader/build
+package/pico2-bootloader/bootloader/*.uf2
+package/pico2-bootloader/bootloader/*.bin
+package/pico2-bootloader/bootloader/demo/build

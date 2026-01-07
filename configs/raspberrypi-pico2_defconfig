@@ -15,10 +15,12 @@ BR2_OPTIMIZE_S=y
 BR2_TARGET_ROOTFS_INITRAMFS=y
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/rootfs_overlay"
 
+# Bootloader
+BR2_PACKAGE_PICO2_BOOTLOADER=y
+
 # Image
-BR2_ROOTFS_POST_IMAGE_SCRIPT="support/scripts/genimage.sh"
-BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/post-build.sh"
-BR2_ROOTFS_POST_SCRIPT_ARGS="-c $(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/genimage.cfg"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/post-image.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT_ARGS="-c $(BR2_EXTERNAL)/board/raspberrypi/raspberrypi-pico2/genimage.cfg"
 
 # Linux headers same as kernel
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_15=y
