@@ -1,7 +1,7 @@
-FROM ubuntu:24.04
+FROM debian:13
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates patch git \
-	make binutils gcc file wget cpio unzip rsync bc bzip2 g++ && \
+	make binutils gcc file wget cpio unzip rsync bc bzip2 g++ picotool && \
 	rm -rf /var/lib/apt/lists/* && \
 	apt-get clean
 
