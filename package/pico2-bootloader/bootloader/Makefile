@@ -84,6 +84,8 @@ $(BUILD_DIR)/$(PROGRAM).uf2: $(BUILD_DIR)/$(PROGRAM).elf
 
 $(BUILD_DIR)/$(PROGRAM).bin: $(BUILD_DIR)/$(PROGRAM).elf
 	$(OBJCOPY) -O binary $< $@
+	@# truncate .bin to __payload_load_start, else the DTB shifts (Bad DT magic)
+	truncate -s $$(( 0x$$($(CROSS_COMPILE)nm $< | awk '$$3=="__payload_load_start"{print $$1}') - 0x10000000 )) $@
 
 # Dummy payload file so we won't get errors if it doesn't exist
 payload.bin:
