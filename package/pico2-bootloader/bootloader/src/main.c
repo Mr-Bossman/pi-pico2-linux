@@ -276,7 +276,6 @@ static void hexdump(const void *data, size_t size) {
 	printf("%08x\n", 16 + size - (size%16));
 }
 
-
 #ifndef PICO_SDK
 /*
  * RP2350 second core (Hazard3 core1) as a bare-metal coprocessor.
@@ -317,11 +316,10 @@ static void core1_puts(const char *s) {
  * state machine; the PIO then runs autonomously in hardware.
  */
 #define C1_PIO_JOB   0x20061100u
+#define C1_PUSH_VAL  0x20061018u   /* core0 -> core1: 32-bit word for PUSH_FIFO */
 #define RESETS_ADDR  0x40020000u
 #define IOBANK0_ADDR 0x40028000u
 #define PADS0_ADDR   0x40038000u
-
-static volatile uint32_t g_ws2812;   /* nonzero: core1 feeds the PIO FIFO (WS2812) */
 
 static uint32_t pio_load_and_run(void)
 {
@@ -387,8 +385,6 @@ static uint32_t pio_load_and_run(void)
 	/* 5) enable the SM */
 	PIO[0x000u / 4] |= (1u << sm);
 
-	g_ws2812 = ws2812;
-
 	/* status: 0x501 | pio_idx | current PC */
 	return 0x50100000u | (pio_idx << 8) | (PIO[(smoff + 0x0cu) / 4] & 0x1fu);
 }
@@ -400,6 +396,152 @@ static uint32_t pio0_sm0_pc(void)
 }
 
 /* Handle one command (op<<24 | arg) and return the reply word. */
+/* ------------------------------------------------------------------------- *
+ * core1-exec: run a native RV32 blob (.c1x) sent from Linux into the SRAM
+ * arena. Inlined into main.c; trap trampoline c1x_run() in src/core1-exec-trap.S.
+ * ------------------------------------------------------------------------- */
+
+/* ---- shared ABI (mirror of host/c1x.h) ------------------------------------ */
+#define C1X_MAGIC       0x58453143u        /* 'C1EX' */
+#define C1X_VERSION     1u
+#define C1X_ARENA_BASE  0x20050000u        /* Linux writes the .c1x here */
+#define C1X_LOAD_ADDR   0x20058000u        /* code runs here (== link addr) */
+#define C1X_STACK_TOP   0x2005FF00u        /* blob stack top */
+#define C1X_CODE_MAX    0x00008000u
+#define C1X_BSS_MAX     0x00004000u
+#define C1_PIO_JOB      0x20061100u        /* existing .piojob staging */
+#define C1_CTR_ADDR     0x20061000u        /* heartbeat counter */
+
+#define C1X_ERR_MAGIC   0xBADC0DE0u
+#define C1X_ERR_VER     0xBADC0DE1u
+#define C1X_ERR_SIZE    0xBADC0DE2u
+#define C1X_ERR_CRC     0xBADC0DE3u
+/* C1X_ERR_TRAP (0xBADC0D00 | mcause8) is produced inside c1x_run(). */
+
+struct c1x_hdr {
+	uint32_t magic;
+	uint16_t version;
+	uint16_t flags;
+	uint32_t load_addr;
+	uint32_t entry_off;
+	uint32_t code_len;
+	uint32_t bss_len;
+	uint32_t arg;
+	uint32_t crc32;
+};
+
+struct c1_services {
+	uint32_t abi_version;
+	void     (*putc)(char c);
+	void     (*puts)(const char *s);
+	void     (*udelay)(uint32_t us);
+	uint32_t (*counter)(void);
+	int32_t  (*load_pio)(const void *piojob);
+};
+
+/* core1_putc/core1_puts/pio_load_and_run are defined earlier in main.c */
+
+/* from core1-exec-trap.S */
+extern int32_t c1x_run(void *fn, const struct c1_services *svc,
+		       uint32_t arg, uint32_t stacktop);
+
+/* ---- CRC32 (zlib / ISO-HDLC), matches Python zlib.crc32 ------------------- */
+static uint32_t c1x_crc32(const uint8_t *p, uint32_t n)
+{
+	uint32_t crc = 0xFFFFFFFFu;
+	uint32_t i;
+	int b;
+
+	for (i = 0; i < n; i++) {
+		crc ^= p[i];
+		for (b = 0; b < 8; b++)
+			crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+	}
+	return ~crc;
+}
+
+/* ---- services exposed to the blob ---------------------------------------- */
+static void c1x_svc_udelay(uint32_t us)
+{
+	/* rough busy delay: ~150 MHz core clock, a few cycles per iteration */
+	volatile uint32_t i;
+	uint32_t n = us * 30u;
+
+	for (i = 0; i < n; i++)
+		__asm__ volatile ("");
+}
+
+static uint32_t c1x_svc_counter(void)
+{
+	return *(volatile uint32_t *)C1_CTR_ADDR;
+}
+
+static int32_t c1x_svc_load_pio(const void *job)
+{
+	const uint8_t *s = (const uint8_t *)job;
+	volatile uint8_t *d = (volatile uint8_t *)C1_PIO_JOB;
+	uint32_t n_instr, total, i;
+
+	/* .piojob length = 28-byte header + 2*n_instr opcodes (n_instr @ byte 6) */
+	n_instr = s[6];
+	total = 28u + 2u * n_instr;
+	if (total > 256u)
+		total = 256u;
+	for (i = 0; i < total; i++)
+		d[i] = s[i];
+	__asm__ volatile ("fence rw,rw" ::: "memory");
+	return (int32_t)pio_load_and_run();
+}
+
+static const struct c1_services c1x_svc = {
+	.abi_version = C1X_VERSION,
+	.putc        = core1_putc,
+	.puts        = core1_puts,
+	.udelay      = c1x_svc_udelay,
+	.counter     = c1x_svc_counter,
+	.load_pio    = c1x_svc_load_pio,
+};
+
+/* ---- EXEC_BLOB: validate, load, run -------------------------------------- */
+uint32_t core1_exec_blob(void)
+{
+	const struct c1x_hdr *h = (const struct c1x_hdr *)C1X_ARENA_BASE;
+	const uint8_t *src = (const uint8_t *)(C1X_ARENA_BASE + sizeof(struct c1x_hdr));
+	volatile uint8_t *dst = (volatile uint8_t *)C1X_LOAD_ADDR;
+	uint32_t clen, blen, i;
+	void *entry;
+
+	if (h->magic != C1X_MAGIC)
+		return C1X_ERR_MAGIC;
+	if (h->version != C1X_VERSION)
+		return C1X_ERR_VER;
+
+	clen = h->code_len;
+	blen = h->bss_len;
+	if (clen == 0u || clen > C1X_CODE_MAX || blen > C1X_BSS_MAX ||
+	    h->entry_off >= clen || h->load_addr != C1X_LOAD_ADDR)
+		return C1X_ERR_SIZE;
+
+	if (c1x_crc32(src, clen) != h->crc32)
+		return C1X_ERR_CRC;
+
+	/* copy code to the run region, zero .bss */
+	for (i = 0; i < clen; i++)
+		dst[i] = src[i];
+	for (i = 0; i < blen; i++)
+		dst[clen + i] = 0u;
+
+	/* make the freshly written instructions fetchable. fence.i is encoded raw
+	 * (.word 0x0000100f) because the bootloader builds with an -march that may
+	 * lack the zifencei extension (e.g. rv32imazicsr); the raw word assembles
+	 * regardless. Encoding: imm=0 rs1=0 funct3=001 rd=0 opcode=0001111. */
+	__asm__ volatile ("fence rw,rw" ::: "memory");
+	__asm__ volatile (".word 0x0000100f" ::: "memory");   /* fence.i */
+
+	entry = (void *)(uintptr_t)(C1X_LOAD_ADDR + h->entry_off);
+	return (uint32_t)c1x_run(entry, &c1x_svc, h->arg, C1X_STACK_TOP);
+}
+
 static uint32_t core1_handle(uint32_t cmd)
 {
 	uint32_t op  = cmd >> 24;
@@ -416,6 +558,24 @@ static uint32_t core1_handle(uint32_t cmd)
 	case 0x05: return 0x52503235u;                       /* 'RP25' */
 	case 0x06: return pio_load_and_run();                /* LOAD_PIO */
 	case 0x07: return pio0_sm0_pc();                     /* PIO0 SM0 PC */
+	case 0x08: {   /* PUSH_FIFO: word from C1_PUSH_VAL -> loaded SM's TX FIFO. The
+	                target pio/sm come from the staging job struct (C1_PIO_JOB); write
+	                only if the SM is running and the FIFO has room. A write to a full
+	                FIFO is dropped by hardware (TXOVER), it does not stall the bus. */
+		volatile uint32_t *J  = (volatile uint32_t *)C1_PIO_JOB;
+		volatile uint8_t  *j8 = (volatile uint8_t  *)C1_PIO_JOB;
+		if (J[0] == 0x424F4950u) {                       /* 'PIOB' */
+			uint32_t pio = j8[4], sm = j8[5];
+			volatile uint32_t *P =
+				(volatile uint32_t *)(0x50200000u + pio * 0x100000u);
+			if ((P[0] & (1u << sm)) &&                /* SM enabled */
+			    !(P[0x004u / 4] & (1u << (16 + sm))))  /* and FIFO has room */
+				P[(0x010u + sm * 4u) / 4] =
+					*(volatile uint32_t *)C1_PUSH_VAL;
+		}
+		return 0xC0DE0008u;
+	}
+	case 0x09: return core1_exec_blob();                /* EXEC_BLOB: run RV32 blob */
 	default:   return 0xBAD00000u | op;
 	}
 }
@@ -434,7 +594,6 @@ static void core1_main(void) {
 	volatile uint32_t *fifo_st = &SIO_BASE[0x50 / 4];
 	volatile uint32_t *fifo_wr = &SIO_BASE[0x54 / 4];
 	volatile uint32_t *fifo_rd = &SIO_BASE[0x58 / 4];
-	uint32_t spin = 0;
 
 	*ctr = 0;
 	*req = 0;
@@ -448,8 +607,11 @@ static void core1_main(void) {
 			__asm__ volatile ("fence" ::: "memory");
 			*req = 0;
 			__asm__ volatile ("fence" ::: "memory");
-			/* ring core0 doorbell: DOORBELL_OUT_SET bit0 -> SIO_IRQ_BELL (26) */
-			*(volatile uint32_t *)0xd0000180u = 1u;
+			/* ring core0 doorbell: DOORBELL_OUT_SET bit0 -> SIO_IRQ_BELL (26).
+			 * PUSH_FIFO (op 0x08) is a silent relay -- skip the doorbell (the
+			 * driver's push path is fire-and-forget and never waits). */
+			if ((r >> 24) != 0x08u)
+				*(volatile uint32_t *)0xd0000180u = 1u;
 		}
 
 		/* channel 2: SIO FIFO */
@@ -463,13 +625,6 @@ static void core1_main(void) {
 
 		(*ctr)++;                            /* heartbeat */
 
-		/* WS2812: periodically push a GRB word (color<<8) to PIO0 SM0 TX FIFO */
-		if (g_ws2812 && ((++spin & 0x007fffffu) == 0)) {
-			static uint32_t on = 1;
-			volatile uint32_t *txf0 = (volatile uint32_t *)(0x50200000u + 0x010u);
-			*txf0 = on ? 0xFF000000u : 0x00000000u;
-			on ^= 1u;
-		}
 	}
 }
 

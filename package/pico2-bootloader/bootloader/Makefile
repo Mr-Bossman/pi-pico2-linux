@@ -25,7 +25,7 @@ CFLAGS :=	-std=gnu11 \
 ASFLAGS := $(CFLAGS)
 LDFLAGS := -nostdlib -Wl,--gc-sections
 
-S_SOURCES = src/rp2350-crt.S src/rp2350-hdr.S
+S_SOURCES = src/rp2350-crt.S src/rp2350-hdr.S src/core1-exec-trap.S
 C_SOURCES = src/main.c src/uart.c src/string.c src/qmi.c src/image.c src/printf.c
 
 OBJECTS = $(addprefix $(BUILD_DIR)/,$(notdir $(C_SOURCES:.c=.o)))

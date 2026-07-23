@@ -25,7 +25,7 @@ diff -ruN a/drivers/misc/Makefile b/drivers/misc/Makefile
 diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 --- a/drivers/misc/rp2350-core1.c	1970-01-01 03:00:00.000000000 +0300
 +++ b/drivers/misc/rp2350-core1.c	2026-07-21 14:13:50.784438100 +0300
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,457 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * RP2350 core1 coprocessor control.
@@ -54,6 +54,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +#include <linux/mutex.h>
 +#include <linux/uaccess.h>
 +#include <linux/slab.h>
++#include <linux/mm.h>
 +
 +/* SIO doorbell registers, relative to reg[0] (0xd0000180) */
 +#define DB_IN_CLR	0x0c
@@ -62,6 +63,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +#define SR_HEARTBEAT	0x000	/* free-running core1 counter */
 +#define SR_MB_REQ	0x010	/* core0 -> core1 (0 = idle) */
 +#define SR_MB_ACK	0x014	/* core1 -> core0 */
++#define SR_PUSH_VAL	0x018	/* core0 -> core1: 32-bit word for PUSH_FIFO */
 +#define SR_PIO_JOB	0x100
 +#define PIO_JOB_MAX	0x100
 +
@@ -75,13 +77,22 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +#define OP_ID		0x05000000u
 +#define OP_LOAD_PIO	0x06000000u
 +#define OP_PIOPC	0x07000000u
++#define OP_PUSH_FIFO	0x08000000u
 +
 +#define RPC_TIMEOUT_MS	1000
++
++/* --- core1-exec (native RV32 blob), keep in sync with host/c1x.h --- */
++#define C1EX_MAGIC	0x58453143u	/* 'C1EX' */
++#define OP_EXEC		0x09000000u
++#define EXEC_TIMEOUT_MS	10000
++#define C1X_HDR_SIZE	32u		/* .c1x header size */
++#define C1X_ARENA_SIZE	0x10000u	/* DTS reg[2]: 64 KiB native-code arena */
 +
 +struct c1_dev {
 +	struct device		*dev;
 +	void __iomem		*db;
 +	void __iomem		*sr;
++	void __iomem		*arena;		/* reg[2]: native-code arena */
 +	int			irq;
 +
 +	dev_t			devt;
@@ -97,7 +108,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +};
 +
 +/* Issue one command and wait (via doorbell IRQ) for core1 to complete it. */
-+static int c1_rpc(struct c1_dev *c, u32 cmd, u32 *resp)
++static int c1_rpc_to(struct c1_dev *c, u32 cmd, u32 *resp, unsigned int tmo_ms)
 +{
 +	long left;
 +	int i, ret = 0;
@@ -117,7 +128,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +	wmb();
 +
 +	left = wait_event_interruptible_timeout(c->wq, c->resp_ready,
-+						msecs_to_jiffies(RPC_TIMEOUT_MS));
++						msecs_to_jiffies(tmo_ms));
 +	if (left == 0) {
 +		ret = -ETIMEDOUT;
 +		goto out;
@@ -136,6 +147,11 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +	return ret;
 +}
 +
++static int c1_rpc(struct c1_dev *c, u32 cmd, u32 *resp)
++{
++	return c1_rpc_to(c, cmd, resp, RPC_TIMEOUT_MS);
++}
++
 +static irqreturn_t c1_isr(int irq, void *data)
 +{
 +	struct c1_dev *c = data;
@@ -152,6 +168,29 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +	return IRQ_HANDLED;
 +}
 +
++/* Load a .c1x blob into the SRAM arena and run it on core1. */
++static ssize_t c1_write_exec(struct c1_dev *c, const char __user *buf, size_t len)
++{
++	void *blob;
++	int ret;
++
++	if (len < C1X_HDR_SIZE || len > C1X_ARENA_SIZE)
++		return -EINVAL;
++	blob = kvmalloc(len, GFP_KERNEL);
++	if (!blob)
++		return -ENOMEM;
++	if (copy_from_user(blob, buf, len)) {
++		kvfree(blob);
++		return -EFAULT;
++	}
++	memcpy_toio(c->arena, blob, len);
++	wmb();
++	kvfree(blob);
++
++	ret = c1_rpc_to(c, OP_EXEC, NULL, EXEC_TIMEOUT_MS);
++	return ret ? ret : (ssize_t)len;
++}
++
 +static ssize_t c1_write(struct file *f, const char __user *buf,
 +			size_t len, loff_t *off)
 +{
@@ -160,11 +199,17 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +	u32 magic;
 +	int ret;
 +
++	if (len < 4)
++		return -EINVAL;
++	if (copy_from_user(&magic, buf, sizeof(magic)))
++		return -EFAULT;
++	if (magic == C1EX_MAGIC)
++		return c1_write_exec(c, buf, len);
++
 +	if (len < 30 || len > sizeof(job))
 +		return -EINVAL;
 +	if (copy_from_user(job, buf, len))
 +		return -EFAULT;
-+	memcpy(&magic, job, sizeof(magic));	/* unaligned-safe */
 +	if (magic != PIOB_MAGIC)
 +		return -EINVAL;
 +
@@ -298,6 +343,37 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +}
 +static DEVICE_ATTR_WO(add);
 +
++/* PUSH_FIFO (op 0x08): put a raw 32-bit word into the loaded PIO SM's TX FIFO.
++ * The value goes through an SRAM slot because op<<24|arg cannot carry 32 bits.
++ * core1 does NOT ring the doorbell for this op, so fire-and-forget: write the
++ * value + REQ and return (a blocking RPC would always time out). */
++static ssize_t push_store(struct device *d, struct device_attribute *a,
++			  const char *b, size_t n)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++	u32 word;
++	int i, ret = 0;
++
++	if (kstrtou32(b, 0, &word))
++		return -EINVAL;
++
++	if (mutex_lock_interruptible(&c->lock))
++		return -ERESTARTSYS;
++	for (i = 0; i < 100000 && readl(c->sr + SR_MB_REQ); i++)
++		cpu_relax();
++	if (readl(c->sr + SR_MB_REQ)) {
++		ret = -EBUSY;
++	} else {
++		writel(word, c->sr + SR_PUSH_VAL);
++		wmb();
++		writel(OP_PUSH_FIFO, c->sr + SR_MB_REQ);
++		wmb();
++	}
++	mutex_unlock(&c->lock);
++	return ret ? ret : n;
++}
++static DEVICE_ATTR_WO(push);
++
 +static struct attribute *c1_attrs[] = {
 +	&dev_attr_result.attr,
 +	&dev_attr_heartbeat.attr,
@@ -309,6 +385,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +	&dev_attr_command.attr,
 +	&dev_attr_led.attr,
 +	&dev_attr_add.attr,
++	&dev_attr_push.attr,
 +	NULL,
 +};
 +ATTRIBUTE_GROUPS(c1);
@@ -333,7 +410,8 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +	/* Shared with core1 and overlapping clint@d0000000: map, do not reserve. */
 +	c->db = devm_ioremap(&pdev->dev, r_db->start, resource_size(r_db));
 +	c->sr = devm_ioremap(&pdev->dev, r_sr->start, resource_size(r_sr));
-+	if (!c->db || !c->sr)
++	c->arena = devm_ioremap(&pdev->dev, 0x20050000u, 0x10000u); /* fixed SRAM arena */
++	if (!c->db || !c->sr || !c->arena)
 +		return -ENOMEM;
 +
 +	c->irq = platform_get_irq(pdev, 0);
