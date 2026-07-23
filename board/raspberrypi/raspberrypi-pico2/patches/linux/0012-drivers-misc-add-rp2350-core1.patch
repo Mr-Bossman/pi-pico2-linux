@@ -1,0 +1,485 @@
+diff -ruN a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+--- a/drivers/misc/Kconfig	2026-07-21 14:13:50.780438136 +0300
++++ b/drivers/misc/Kconfig	2026-07-21 14:13:50.784438100 +0300
+@@ -648,4 +648,12 @@
+ source "drivers/misc/pvpanic/Kconfig"
+ source "drivers/misc/mchp_pci1xxxx/Kconfig"
+ source "drivers/misc/keba/Kconfig"
++config RP2350_CORE1
++	bool "RP2350 core1 coprocessor control"
++	depends on OF
++	default y
++	help
++	  Char device /dev/core1 and /sys/class/core1 to control the RP2350
++	  bare-metal core1 coprocessor (SRAM mailbox: write=c1p, read=result).
++
+ endmenu
+diff -ruN a/drivers/misc/Makefile b/drivers/misc/Makefile
+--- a/drivers/misc/Makefile	2026-07-21 14:13:50.784438100 +0300
++++ b/drivers/misc/Makefile	2026-07-21 14:13:50.784438100 +0300
+@@ -74,3 +74,4 @@
+ lan966x-pci-objs		+= lan966x_pci.dtbo.o
+ obj-$(CONFIG_MCHP_LAN966X_PCI)	+= lan966x-pci.o
+ obj-y				+= keba/
++obj-$(CONFIG_RP2350_CORE1)	+= rp2350-core1.o
+diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
+--- a/drivers/misc/rp2350-core1.c	1970-01-01 03:00:00.000000000 +0300
++++ b/drivers/misc/rp2350-core1.c	2026-07-21 14:13:50.784438100 +0300
+@@ -0,0 +1,457 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * RP2350 core1 coprocessor control.
++ *
++ * Exposes the bare-metal second core (RISC-V Hazard3) to userspace:
++ *   write(/dev/core1, c1p)  load and run a PIO program (.c1p blob)
++ *   read(/dev/core1)           result word of the last command (u32 LE)
++ *   /sys/class/core1/core1/*   discrete commands and parameters
++ *
++ * Commands travel through an SRAM mailbox; core1 rings a SIO doorbell
++ * (SIO_IRQ_BELL, IRQ 26) when it finishes one. Kernel (M-mode) and core1
++ * share the same secure SIO bank and SRAM.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/platform_device.h>
++#include <linux/of.h>
++#include <linux/io.h>
++#include <linux/interrupt.h>
++#include <linux/cdev.h>
++#include <linux/fs.h>
++#include <linux/device.h>
++#include <linux/poll.h>
++#include <linux/wait.h>
++#include <linux/mutex.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++#include <linux/mm.h>
++
++/* SIO doorbell registers, relative to reg[0] (0xd0000180) */
++#define DB_IN_CLR	0x0c
++
++/* SRAM mailbox window, relative to reg[1] (0x20061000, size 0x200) */
++#define SR_HEARTBEAT	0x000	/* free-running core1 counter */
++#define SR_MB_REQ	0x010	/* core0 -> core1 (0 = idle) */
++#define SR_MB_ACK	0x014	/* core1 -> core0 */
++#define SR_PUSH_VAL	0x018	/* core0 -> core1: 32-bit word for PUSH_FIFO */
++#define SR_PIO_JOB	0x100
++#define PIO_JOB_MAX	0x100
++
++#define C1PB_MAGIC	0x42503143u	/* 'C1PB' */
++
++/* core1 command opcodes (op << 24 | arg) */
++#define OP_PING		0x01000000u
++#define OP_COUNT	0x02000000u
++#define OP_ADD		0x03000000u
++#define OP_LED		0x04000000u
++#define OP_ID		0x05000000u
++#define OP_LOAD_PIO	0x06000000u
++#define OP_PIOPC	0x07000000u
++#define OP_PUSH_FIFO	0x08000000u
++
++#define RPC_TIMEOUT_MS	1000
++
++/* --- core1-exec (native RV32 blob), keep in sync with host/c1x.h --- */
++#define C1EX_MAGIC	0x58453143u	/* 'C1EX' */
++#define OP_EXEC		0x09000000u
++#define EXEC_TIMEOUT_MS	10000
++#define C1X_HDR_SIZE	32u		/* .c1x header size */
++#define C1X_ARENA_SIZE	0x10000u	/* DTS reg[2]: 64 KiB native-code arena */
++
++struct c1_dev {
++	struct device		*dev;
++	void __iomem		*db;
++	void __iomem		*sr;
++	void __iomem		*arena;		/* reg[2]: native-code arena */
++	int			irq;
++
++	dev_t			devt;
++	struct cdev		cdev;
++	struct class		*class;
++	struct device		*chardev;
++
++	wait_queue_head_t	wq;
++	struct mutex		lock;
++	u32			last_result;
++	u32			nirq;
++	bool			resp_ready;
++};
++
++/* Issue one command and wait (via doorbell IRQ) for core1 to complete it. */
++static int c1_rpc_to(struct c1_dev *c, u32 cmd, u32 *resp, unsigned int tmo_ms)
++{
++	long left;
++	int i, ret = 0;
++
++	if (mutex_lock_interruptible(&c->lock))
++		return -ERESTARTSYS;
++
++	for (i = 0; i < 100000 && readl(c->sr + SR_MB_REQ); i++)
++		cpu_relax();
++	if (readl(c->sr + SR_MB_REQ)) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	c->resp_ready = false;
++	writel(cmd, c->sr + SR_MB_REQ);
++	wmb();
++
++	left = wait_event_interruptible_timeout(c->wq, c->resp_ready,
++						msecs_to_jiffies(tmo_ms));
++	if (left == 0) {
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++	if (left < 0) {
++		ret = -ERESTARTSYS;
++		goto out;
++	}
++
++	smp_rmb();
++	c->last_result = readl(c->sr + SR_MB_ACK);
++	if (resp)
++		*resp = c->last_result;
++out:
++	mutex_unlock(&c->lock);
++	return ret;
++}
++
++static int c1_rpc(struct c1_dev *c, u32 cmd, u32 *resp)
++{
++	return c1_rpc_to(c, cmd, resp, RPC_TIMEOUT_MS);
++}
++
++static irqreturn_t c1_isr(int irq, void *data)
++{
++	struct c1_dev *c = data;
++	u32 mask = readl(c->db + DB_IN_CLR);
++
++	if (!mask)
++		return IRQ_NONE;
++
++	writel(mask, c->db + DB_IN_CLR);	/* ack, deasserts the doorbell IRQ */
++	c->nirq++;
++	c->resp_ready = true;
++	smp_wmb();
++	wake_up_interruptible(&c->wq);
++	return IRQ_HANDLED;
++}
++
++/* Load a .c1x blob into the SRAM arena and run it on core1. */
++static ssize_t c1_write_exec(struct c1_dev *c, const char __user *buf, size_t len)
++{
++	void *blob;
++	int ret;
++
++	if (len < C1X_HDR_SIZE || len > C1X_ARENA_SIZE)
++		return -EINVAL;
++	blob = kvmalloc(len, GFP_KERNEL);
++	if (!blob)
++		return -ENOMEM;
++	if (copy_from_user(blob, buf, len)) {
++		kvfree(blob);
++		return -EFAULT;
++	}
++	memcpy_toio(c->arena, blob, len);
++	wmb();
++	kvfree(blob);
++
++	ret = c1_rpc_to(c, OP_EXEC, NULL, EXEC_TIMEOUT_MS);
++	return ret ? ret : (ssize_t)len;
++}
++
++static ssize_t c1_write(struct file *f, const char __user *buf,
++			size_t len, loff_t *off)
++{
++	struct c1_dev *c = f->private_data;
++	u8 job[PIO_JOB_MAX];
++	u32 magic;
++	int ret;
++
++	if (len < 4)
++		return -EINVAL;
++	if (copy_from_user(&magic, buf, sizeof(magic)))
++		return -EFAULT;
++	if (magic == C1EX_MAGIC)
++		return c1_write_exec(c, buf, len);
++
++	if (len < 30 || len > sizeof(job))
++		return -EINVAL;
++	if (copy_from_user(job, buf, len))
++		return -EFAULT;
++	if (magic != C1PB_MAGIC)
++		return -EINVAL;
++
++	memcpy_toio(c->sr + SR_PIO_JOB, job, len);
++	wmb();
++
++	ret = c1_rpc(c, OP_LOAD_PIO, NULL);
++	return ret ? ret : len;
++}
++
++static ssize_t c1_read(struct file *f, char __user *buf,
++		       size_t len, loff_t *off)
++{
++	struct c1_dev *c = f->private_data;
++	u32 v = c->last_result;
++
++	if (*off > 0)				/* one word per read, then EOF */
++		return 0;
++	if (len < sizeof(v))
++		return -EINVAL;
++	if (put_user(v, (u32 __user *)buf))
++		return -EFAULT;
++	*off += sizeof(v);
++	return sizeof(v);
++}
++
++static __poll_t c1_poll(struct file *f, struct poll_table_struct *pt)
++{
++	struct c1_dev *c = f->private_data;
++
++	poll_wait(f, &c->wq, pt);
++	return EPOLLIN | EPOLLRDNORM;
++}
++
++static int c1_open(struct inode *ino, struct file *f)
++{
++	f->private_data = container_of(ino->i_cdev, struct c1_dev, cdev);
++	return 0;
++}
++
++static const struct file_operations c1_fops = {
++	.owner	= THIS_MODULE,
++	.open	= c1_open,
++	.write	= c1_write,
++	.read	= c1_read,
++	.poll	= c1_poll,
++};
++
++static ssize_t result_show(struct device *d, struct device_attribute *a, char *b)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++
++	return sysfs_emit(b, "0x%08x\n", c->last_result);
++}
++static DEVICE_ATTR_RO(result);
++
++static ssize_t heartbeat_show(struct device *d, struct device_attribute *a, char *b)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++
++	return sysfs_emit(b, "%u\n", readl(c->sr + SR_HEARTBEAT));
++}
++static DEVICE_ATTR_RO(heartbeat);
++
++static ssize_t irq_count_show(struct device *d, struct device_attribute *a, char *b)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++
++	return sysfs_emit(b, "%u\n", c->nirq);
++}
++static DEVICE_ATTR_RO(irq_count);
++
++/* Read-only attributes that run a command and report its result. */
++#define C1_TRIGGER_RO(name, opcode, fmt)				\
++static ssize_t name##_show(struct device *d,				\
++			   struct device_attribute *a, char *b)		\
++{									\
++	struct c1_dev *c = dev_get_drvdata(d);				\
++	u32 r;								\
++	int ret = c1_rpc(c, (opcode), &r);				\
++	if (ret)							\
++		return ret;						\
++	return sysfs_emit(b, fmt, r);					\
++}									\
++static DEVICE_ATTR_RO(name)
++
++C1_TRIGGER_RO(ping,  OP_PING,  "0x%08x\n");
++C1_TRIGGER_RO(id,    OP_ID,    "0x%08x\n");
++C1_TRIGGER_RO(count, OP_COUNT, "%u\n");
++C1_TRIGGER_RO(piopc, OP_PIOPC, "%u\n");
++
++static ssize_t command_store(struct device *d, struct device_attribute *a,
++			     const char *b, size_t n)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++	u32 cmd;
++	int ret;
++
++	if (kstrtou32(b, 0, &cmd))
++		return -EINVAL;
++	ret = c1_rpc(c, cmd, NULL);
++	return ret ? ret : n;
++}
++static DEVICE_ATTR_WO(command);
++
++static ssize_t led_store(struct device *d, struct device_attribute *a,
++			 const char *b, size_t n)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++	u32 v;
++	int ret;
++
++	if (kstrtou32(b, 0, &v))
++		return -EINVAL;
++	ret = c1_rpc(c, OP_LED | (v & 1u), NULL);
++	return ret ? ret : n;
++}
++static DEVICE_ATTR_WO(led);
++
++static ssize_t add_store(struct device *d, struct device_attribute *a,
++			 const char *b, size_t n)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++	u32 v;
++	int ret;
++
++	if (kstrtou32(b, 0, &v))
++		return -EINVAL;
++	ret = c1_rpc(c, OP_ADD | (v & 0x00ffffffu), NULL);
++	return ret ? ret : n;
++}
++static DEVICE_ATTR_WO(add);
++
++/* PUSH_FIFO (op 0x08): put a raw 32-bit word into the loaded PIO SM's TX FIFO.
++ * The value goes through an SRAM slot because op<<24|arg cannot carry 32 bits.
++ * core1 does NOT ring the doorbell for this op, so fire-and-forget: write the
++ * value + REQ and return (a blocking RPC would always time out). */
++static ssize_t push_store(struct device *d, struct device_attribute *a,
++			  const char *b, size_t n)
++{
++	struct c1_dev *c = dev_get_drvdata(d);
++	u32 word;
++	int i, ret = 0;
++
++	if (kstrtou32(b, 0, &word))
++		return -EINVAL;
++
++	if (mutex_lock_interruptible(&c->lock))
++		return -ERESTARTSYS;
++	for (i = 0; i < 100000 && readl(c->sr + SR_MB_REQ); i++)
++		cpu_relax();
++	if (readl(c->sr + SR_MB_REQ)) {
++		ret = -EBUSY;
++	} else {
++		writel(word, c->sr + SR_PUSH_VAL);
++		wmb();
++		writel(OP_PUSH_FIFO, c->sr + SR_MB_REQ);
++		wmb();
++	}
++	mutex_unlock(&c->lock);
++	return ret ? ret : n;
++}
++static DEVICE_ATTR_WO(push);
++
++static struct attribute *c1_attrs[] = {
++	&dev_attr_result.attr,
++	&dev_attr_heartbeat.attr,
++	&dev_attr_irq_count.attr,
++	&dev_attr_ping.attr,
++	&dev_attr_id.attr,
++	&dev_attr_count.attr,
++	&dev_attr_piopc.attr,
++	&dev_attr_command.attr,
++	&dev_attr_led.attr,
++	&dev_attr_add.attr,
++	&dev_attr_push.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(c1);
++
++static int c1_probe(struct platform_device *pdev)
++{
++	struct c1_dev *c;
++	struct resource *r_db, *r_sr;
++	int ret;
++
++	c = devm_kzalloc(&pdev->dev, sizeof(*c), GFP_KERNEL);
++	if (!c)
++		return -ENOMEM;
++	c->dev = &pdev->dev;
++	init_waitqueue_head(&c->wq);
++	mutex_init(&c->lock);
++
++	r_db = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	r_sr = platform_get_resource(pdev, IORESOURCE_MEM, 1);
++	if (!r_db || !r_sr)
++		return -EINVAL;
++	/* Shared with core1 and overlapping clint@d0000000: map, do not reserve. */
++	c->db = devm_ioremap(&pdev->dev, r_db->start, resource_size(r_db));
++	c->sr = devm_ioremap(&pdev->dev, r_sr->start, resource_size(r_sr));
++	c->arena = devm_ioremap(&pdev->dev, 0x20050000u, 0x10000u); /* fixed SRAM arena */
++	if (!c->db || !c->sr || !c->arena)
++		return -ENOMEM;
++
++	c->irq = platform_get_irq(pdev, 0);
++	if (c->irq < 0)
++		return c->irq;
++	writel(0xff, c->db + DB_IN_CLR);	/* clear any stale doorbells */
++	ret = devm_request_irq(&pdev->dev, c->irq, c1_isr, 0, "rp2350-core1", c);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret, "request_irq %d\n", c->irq);
++
++	ret = alloc_chrdev_region(&c->devt, 0, 1, "core1");
++	if (ret)
++		return ret;
++	cdev_init(&c->cdev, &c1_fops);
++	c->cdev.owner = THIS_MODULE;
++	ret = cdev_add(&c->cdev, c->devt, 1);
++	if (ret)
++		goto err_chrdev;
++	c->class = class_create("core1");
++	if (IS_ERR(c->class)) {
++		ret = PTR_ERR(c->class);
++		goto err_cdev;
++	}
++	c->chardev = device_create_with_groups(c->class, &pdev->dev, c->devt,
++					       c, c1_groups, "core1");
++	if (IS_ERR(c->chardev)) {
++		ret = PTR_ERR(c->chardev);
++		goto err_class;
++	}
++
++	platform_set_drvdata(pdev, c);
++	dev_info(&pdev->dev, "/dev/core1 ready, irq=%d\n", c->irq);
++	return 0;
++
++err_class:
++	class_destroy(c->class);
++err_cdev:
++	cdev_del(&c->cdev);
++err_chrdev:
++	unregister_chrdev_region(c->devt, 1);
++	return ret;
++}
++
++static void c1_remove(struct platform_device *pdev)
++{
++	struct c1_dev *c = platform_get_drvdata(pdev);
++
++	device_destroy(c->class, c->devt);
++	class_destroy(c->class);
++	cdev_del(&c->cdev);
++	unregister_chrdev_region(c->devt, 1);
++}
++
++static const struct of_device_id c1_of_match[] = {
++	{ .compatible = "raspberrypi,rp2350-core1" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, c1_of_match);
++
++static struct platform_driver c1_driver = {
++	.probe	= c1_probe,
++	.remove	= c1_remove,
++	.driver	= {
++		.name		= "rp2350-core1",
++		.of_match_table	= c1_of_match,
++	},
++};
++module_platform_driver(c1_driver);
++
++MODULE_DESCRIPTION("RP2350 core1 coprocessor control (cdev + sysfs)");
++MODULE_LICENSE("GPL");

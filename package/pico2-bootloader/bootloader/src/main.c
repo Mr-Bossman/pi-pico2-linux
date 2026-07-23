@@ -56,6 +56,9 @@ static inline const void* get_payload_start_address(void);
 static int psram_setup_and_test(size_t *psram_size);
 static int test_executability(void* addr);
 static void jump_to_kernel(void *ram_addr, const void *data_addr);
+#ifndef PICO_SDK
+static int launch_core1(void);
+#endif
 
 int main(void) {
 	int ret = 0;
@@ -130,8 +133,16 @@ int main(void) {
 	printf("\rRam dump:              \n");
 	hexdump(ram_addr, 0x20);
 
-	if (kernel_size)
+	if (kernel_size) {
+#ifndef PICO_SDK
+		/* Bring up core1 as a bare-metal coprocessor before entering Linux. */
+		if (launch_core1() == 0)
+			puts("[boot] core1 launched as bare-metal coprocessor");
+		else
+			puts("[boot] core1 launch skipped (no response)");
+#endif
 		jump_to_kernel(ram_addr, data_addr);
+	}
 
 	ret = wait_for_input("Press y to jump to PSRAM...\r");
 	if (ret == 'y' || ret == 'Y') {
@@ -264,3 +275,434 @@ static void hexdump(const void *data, size_t size) {
 	}
 	printf("%08x\n", 16 + size - (size%16));
 }
+
+#ifndef PICO_SDK
+/*
+ * RP2350 second core (Hazard3 core1) as a bare-metal coprocessor.
+ *
+ * Linux is UP (CONFIG_SMP=n) and uses core0 only. The bootloader launches
+ * core1 via the bootrom wait_for_vector protocol (RP2350 datasheet 5.3) and
+ * then hands core0 to Linux. core1_main is linked into the bootloader .text,
+ * which runs from SRAM, so core1 keeps executing after core0 enters Linux
+ * (Linux lives in PSRAM and leaves this SRAM region alone). core1 stack and
+ * counter sit in the upper SRAM (>256 KiB), unused by bootloader or Linux.
+ */
+
+#define C1_UART0_DR   0x40070000u
+#define C1_UART0_FR   0x40070018u
+#define C1_UART_TXFF  (1u << 5)
+#define C1_STACK_TOP  0x20070000u
+#define C1_CTR_ADDR   0x20061000u   /* heartbeat counter */
+
+/* h3.unblock = slt x0,x0,x1: Hazard3 equivalent of __sev (RP2350 DS 3.8.6.3.2) */
+static inline void h3_unblock(void) { __asm__ volatile ("slt x0, x0, x1"); }
+
+static inline void core1_putc(char c) {
+	volatile uint32_t *fr = (volatile uint32_t *)C1_UART0_FR;
+	volatile uint32_t *dr = (volatile uint32_t *)C1_UART0_DR;
+	while (*fr & C1_UART_TXFF)
+		;
+	*dr = (uint32_t)(uint8_t)c;
+}
+
+static void core1_puts(const char *s) {
+	while (*s)
+		core1_putc(*s++);
+}
+
+/*
+ * PIO offload: load and run a PIO program passed from Linux as a '.c1p'
+ * blob in SRAM (C1_PIO_JOB). core1 brings up the PIO block and starts the
+ * state machine; the PIO then runs autonomously in hardware.
+ */
+#define C1_PIO_JOB   0x20061100u
+#define C1_PUSH_VAL  0x20061018u   /* core0 -> core1: 32-bit word for PUSH_FIFO */
+#define RESETS_ADDR  0x40020000u
+#define IOBANK0_ADDR 0x40028000u
+#define PADS0_ADDR   0x40038000u
+
+static uint32_t pio_load_and_run(void)
+{
+	volatile uint8_t  *j8  = (volatile uint8_t  *)C1_PIO_JOB;
+	volatile uint32_t *j32 = (volatile uint32_t *)C1_PIO_JOB;
+	volatile uint16_t *ins = (volatile uint16_t *)(C1_PIO_JOB + 28);
+
+	if (j32[0] != 0x42503143u)                 /* magic 'C1PB' */
+		return 0xBADF11E0u;
+
+	uint32_t pio_idx = j8[4], sm = j8[5], n = j8[6], flags = j8[7];
+	uint32_t clkdiv  = j32[2];
+	uint32_t set_base = j8[12], set_count = j8[13];
+	uint32_t side_base = j8[16], side_count = j8[17];
+	uint32_t wrap_bottom = j8[19], wrap_top = j8[20];
+	uint32_t gpio_mask = j32[6];
+	uint32_t ws2812 = flags & 1u;              /* WS2812 mode: sideset+autopull+FIFO */
+	uint32_t i, p;
+
+	if (pio_idx > 2 || sm > 3 || n == 0 || n > 32)
+		return 0xBADF11E1u;
+
+	volatile uint32_t *PIO = (volatile uint32_t *)(0x50200000u + pio_idx * 0x100000u);
+	uint32_t funcsel = 6u + pio_idx;           /* PIO0=6, PIO1=7, PIO2=8 */
+	uint32_t rbit    = 1u << (11 + pio_idx);   /* RESETS bit: PIO0=11.. */
+	uint32_t smoff   = 0xc8u + sm * 0x18u;      /* SMx registers from SM0_CLKDIV */
+
+	/* 1) release PIO from reset, wait RESET_DONE */
+	{
+		uint32_t g = 2000000u;
+		*(volatile uint32_t *)(RESETS_ADDR + 0x3000u) = rbit;
+		while (!(*(volatile uint32_t *)(RESETS_ADDR + 0x8u) & rbit) && --g)
+			;
+		if (!g) return 0xBADF11E2u;
+	}
+
+	/* 2) pinmux: route each GPIO in the mask to the PIO function, enable pad */
+	for (p = 0; p < 32; p++) {
+		if (gpio_mask & (1u << p)) {
+			*(volatile uint32_t *)(PADS0_ADDR + 4u + p * 4u) = 0u;
+			*(volatile uint32_t *)(IOBANK0_ADDR + p * 8u + 4u) = funcsel;
+		}
+	}
+
+	/* 3) load opcodes into INSTR_MEM */
+	for (i = 0; i < n; i++)
+		PIO[(0x048u + i * 4u) / 4] = ins[i];
+
+	/* 4) configure the state machine */
+	PIO[(smoff + 0x00u) / 4] = clkdiv;                                  /* CLKDIV */
+	PIO[(smoff + 0x04u) / 4] = (wrap_top << 12) | (wrap_bottom << 7);   /* EXECCTRL wrap */
+	/* SHIFTCTRL: WS2812 -> autopull, PULL_THRESH=24, OUT shift left (MSB first) */
+	PIO[(smoff + 0x08u) / 4] = ws2812 ? ((24u << 25) | (1u << 17)) : 0u;
+	if (ws2812) {
+		/* drive the sideset pin: point SET group at side_base, run `set pindirs,1` */
+		PIO[(smoff + 0x14u) / 4] = (1u << 26) | (side_base << 5);
+		PIO[(smoff + 0x10u) / 4] = 0xE081u;
+	}
+	PIO[(smoff + 0x14u) / 4] = (side_count << 29) | (set_count << 26)
+				 | (side_base << 10) | (set_base << 5);    /* PINCTRL */
+	PIO[(smoff + 0x10u) / 4] = 0x0000u;                                 /* SMx_INSTR: jmp 0 */
+
+	/* 5) enable the SM */
+	PIO[0x000u / 4] |= (1u << sm);
+
+	/* status: 0x501 | pio_idx | current PC */
+	return 0x50100000u | (pio_idx << 8) | (PIO[(smoff + 0x0cu) / 4] & 0x1fu);
+}
+
+static uint32_t pio0_sm0_pc(void)
+{
+	volatile uint32_t *PIO = (volatile uint32_t *)0x50200000u;
+	return PIO[(0xc8u + 0x0cu) / 4] & 0x1fu;   /* SM0_ADDR */
+}
+
+/* Handle one command (op<<24 | arg) and return the reply word. */
+/* ------------------------------------------------------------------------- *
+ * core1-exec: run a native RV32 blob (.c1x) sent from Linux into the SRAM
+ * arena. Inlined into main.c; trap trampoline c1x_run() in src/core1-exec-trap.S.
+ * ------------------------------------------------------------------------- */
+
+/* ---- shared ABI (mirror of host/c1x.h) ------------------------------------ */
+#define C1X_MAGIC       0x58453143u        /* 'C1EX' */
+#define C1X_VERSION     1u
+#define C1X_ARENA_BASE  0x20050000u        /* Linux writes the .c1x here */
+#define C1X_LOAD_ADDR   0x20058000u        /* code runs here (== link addr) */
+#define C1X_STACK_TOP   0x2005FF00u        /* blob stack top */
+#define C1X_CODE_MAX    0x00008000u
+#define C1X_BSS_MAX     0x00004000u
+#define C1_PIO_JOB      0x20061100u        /* existing .c1p staging */
+#define C1_CTR_ADDR     0x20061000u        /* heartbeat counter */
+
+#define C1X_ERR_MAGIC   0xBADC0DE0u
+#define C1X_ERR_VER     0xBADC0DE1u
+#define C1X_ERR_SIZE    0xBADC0DE2u
+#define C1X_ERR_CRC     0xBADC0DE3u
+/* C1X_ERR_TRAP (0xBADC0D00 | mcause8) is produced inside c1x_run(). */
+
+struct c1x_hdr {
+	uint32_t magic;
+	uint16_t version;
+	uint16_t flags;
+	uint32_t load_addr;
+	uint32_t entry_off;
+	uint32_t code_len;
+	uint32_t bss_len;
+	uint32_t arg;
+	uint32_t crc32;
+};
+
+struct c1_services {
+	uint32_t abi_version;
+	void     (*putc)(char c);
+	void     (*puts)(const char *s);
+	void     (*udelay)(uint32_t us);
+	uint32_t (*counter)(void);
+	int32_t  (*load_pio)(const void *c1p);
+};
+
+/* core1_putc/core1_puts/pio_load_and_run are defined earlier in main.c */
+
+/* from core1-exec-trap.S */
+extern int32_t c1x_run(void *fn, const struct c1_services *svc,
+		       uint32_t arg, uint32_t stacktop);
+
+/* ---- CRC32 (zlib / ISO-HDLC), matches Python zlib.crc32 ------------------- */
+static uint32_t c1x_crc32(const uint8_t *p, uint32_t n)
+{
+	uint32_t crc = 0xFFFFFFFFu;
+	uint32_t i;
+	int b;
+
+	for (i = 0; i < n; i++) {
+		crc ^= p[i];
+		for (b = 0; b < 8; b++)
+			crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+	}
+	return ~crc;
+}
+
+/* ---- services exposed to the blob ---------------------------------------- */
+static void c1x_svc_udelay(uint32_t us)
+{
+	/* rough busy delay: ~150 MHz core clock, a few cycles per iteration */
+	volatile uint32_t i;
+	uint32_t n = us * 30u;
+
+	for (i = 0; i < n; i++)
+		__asm__ volatile ("");
+}
+
+static uint32_t c1x_svc_counter(void)
+{
+	return *(volatile uint32_t *)C1_CTR_ADDR;
+}
+
+static int32_t c1x_svc_load_pio(const void *job)
+{
+	const uint8_t *s = (const uint8_t *)job;
+	volatile uint8_t *d = (volatile uint8_t *)C1_PIO_JOB;
+	uint32_t n_instr, total, i;
+
+	/* .c1p length = 28-byte header + 2*n_instr opcodes (n_instr @ byte 6) */
+	n_instr = s[6];
+	total = 28u + 2u * n_instr;
+	if (total > 256u)
+		total = 256u;
+	for (i = 0; i < total; i++)
+		d[i] = s[i];
+	__asm__ volatile ("fence rw,rw" ::: "memory");
+	return (int32_t)pio_load_and_run();
+}
+
+static const struct c1_services c1x_svc = {
+	.abi_version = C1X_VERSION,
+	.putc        = core1_putc,
+	.puts        = core1_puts,
+	.udelay      = c1x_svc_udelay,
+	.counter     = c1x_svc_counter,
+	.load_pio    = c1x_svc_load_pio,
+};
+
+/* ---- EXEC_BLOB: validate, load, run -------------------------------------- */
+uint32_t core1_exec_blob(void)
+{
+	const struct c1x_hdr *h = (const struct c1x_hdr *)C1X_ARENA_BASE;
+	const uint8_t *src = (const uint8_t *)(C1X_ARENA_BASE + sizeof(struct c1x_hdr));
+	volatile uint8_t *dst = (volatile uint8_t *)C1X_LOAD_ADDR;
+	uint32_t clen, blen, i;
+	void *entry;
+
+	if (h->magic != C1X_MAGIC)
+		return C1X_ERR_MAGIC;
+	if (h->version != C1X_VERSION)
+		return C1X_ERR_VER;
+
+	clen = h->code_len;
+	blen = h->bss_len;
+	if (clen == 0u || clen > C1X_CODE_MAX || blen > C1X_BSS_MAX ||
+	    h->entry_off >= clen || h->load_addr != C1X_LOAD_ADDR)
+		return C1X_ERR_SIZE;
+
+	if (c1x_crc32(src, clen) != h->crc32)
+		return C1X_ERR_CRC;
+
+	/* copy code to the run region, zero .bss */
+	for (i = 0; i < clen; i++)
+		dst[i] = src[i];
+	for (i = 0; i < blen; i++)
+		dst[clen + i] = 0u;
+
+	/* make the freshly written instructions fetchable. fence.i is encoded raw
+	 * (.word 0x0000100f) because the bootloader builds with an -march that may
+	 * lack the zifencei extension (e.g. rv32imazicsr); the raw word assembles
+	 * regardless. Encoding: imm=0 rs1=0 funct3=001 rd=0 opcode=0001111. */
+	__asm__ volatile ("fence rw,rw" ::: "memory");
+	__asm__ volatile (".word 0x0000100f" ::: "memory");   /* fence.i */
+
+	entry = (void *)(uintptr_t)(C1X_LOAD_ADDR + h->entry_off);
+	return (uint32_t)c1x_run(entry, &c1x_svc, h->arg, C1X_STACK_TOP);
+}
+
+static uint32_t core1_handle(uint32_t cmd)
+{
+	uint32_t op  = cmd >> 24;
+	uint32_t arg = cmd & 0x00ffffffu;
+
+	switch (op) {
+	case 0x01: return 0xC0DE0001u;                       /* PING */
+	case 0x02: return *(volatile uint32_t *)C1_CTR_ADDR; /* GET_COUNT */
+	case 0x03: return arg + 1u;                          /* ADD1 */
+	case 0x04:                                           /* LED on/off */
+		if (arg & 1u) SIO_BASE[0x18 / 4] = (1u << LED_PIN);
+		else          SIO_BASE[0x20 / 4] = (1u << LED_PIN);
+		return 0xC0DE0004u;
+	case 0x05: return 0x52503235u;                       /* 'RP25' */
+	case 0x06: return pio_load_and_run();                /* LOAD_PIO */
+	case 0x07: return pio0_sm0_pc();                     /* PIO0 SM0 PC */
+	case 0x08: {   /* PUSH_FIFO: word from C1_PUSH_VAL -> loaded SM's TX FIFO. The
+	                target pio/sm come from the staging job struct (C1_PIO_JOB); write
+	                only if the SM is running and the FIFO has room. A write to a full
+	                FIFO is dropped by hardware (TXOVER), it does not stall the bus. */
+		volatile uint32_t *J  = (volatile uint32_t *)C1_PIO_JOB;
+		volatile uint8_t  *j8 = (volatile uint8_t  *)C1_PIO_JOB;
+		if (J[0] == 0x42503143u) {                       /* 'C1PB' */
+			uint32_t pio = j8[4], sm = j8[5];
+			volatile uint32_t *P =
+				(volatile uint32_t *)(0x50200000u + pio * 0x100000u);
+			if ((P[0] & (1u << sm)) &&                /* SM enabled */
+			    !(P[0x004u / 4] & (1u << (16 + sm))))  /* and FIFO has room */
+				P[(0x010u + sm * 4u) / 4] =
+					*(volatile uint32_t *)C1_PUSH_VAL;
+		}
+		return 0xC0DE0008u;
+	}
+	case 0x09: return core1_exec_blob();                /* EXEC_BLOB: run RV32 blob */
+	default:   return 0xBAD00000u | op;
+	}
+}
+
+/*
+ * core1 entry point (never returns). Serves commands from the SRAM mailbox
+ * (REQ/ACK) and, as an alternative, the inter-core SIO FIFO; keeps a
+ * heartbeat counter running and optionally feeds the WS2812 PIO FIFO.
+ */
+#define C1_MB_REQ_ADDR  0x20061010u
+#define C1_MB_ACK_ADDR  0x20061014u
+static void core1_main(void) {
+	volatile uint32_t *ctr     = (volatile uint32_t *)C1_CTR_ADDR;
+	volatile uint32_t *req     = (volatile uint32_t *)C1_MB_REQ_ADDR;
+	volatile uint32_t *ack     = (volatile uint32_t *)C1_MB_ACK_ADDR;
+	volatile uint32_t *fifo_st = &SIO_BASE[0x50 / 4];
+	volatile uint32_t *fifo_wr = &SIO_BASE[0x54 / 4];
+	volatile uint32_t *fifo_rd = &SIO_BASE[0x58 / 4];
+
+	*ctr = 0;
+	*req = 0;
+	core1_puts("\r\n[core1] hart=1 up: mailbox(SRAM)+FIFO command server ready\r\n");
+
+	for (;;) {
+		/* channel 1: SRAM mailbox */
+		uint32_t r = *req;
+		if (r) {
+			*ack = core1_handle(r);
+			__asm__ volatile ("fence" ::: "memory");
+			*req = 0;
+			__asm__ volatile ("fence" ::: "memory");
+			/* ring core0 doorbell: DOORBELL_OUT_SET bit0 -> SIO_IRQ_BELL (26).
+			 * PUSH_FIFO (op 0x08) is a silent relay -- skip the doorbell (the
+			 * driver's push path is fire-and-forget and never waits). */
+			if ((r >> 24) != 0x08u)
+				*(volatile uint32_t *)0xd0000180u = 1u;
+		}
+
+		/* channel 2: SIO FIFO */
+		if (*fifo_st & 1u) {
+			uint32_t resp = core1_handle(*fifo_rd);
+			while (!(*fifo_st & 2u))
+				;
+			*fifo_wr = resp;
+			__asm__ volatile ("fence" ::: "memory");
+		}
+
+		(*ctr)++;                            /* heartbeat */
+
+	}
+}
+
+/* PSM (Power State Machine): per-core reset. RP2350 DS 7.4. */
+#define PSM_FRCE_OFF_ADDR  0x40018004u
+#define PSM_DONE_ADDR      0x4001800cu
+#define PSM_PROC1_BIT      (1u << 24)
+
+/* Power-cycle core1 so it re-runs the bootrom and waits in wait_for_vector. */
+static void reset_core1(void) {
+	volatile uint32_t *frce_off = (volatile uint32_t *)PSM_FRCE_OFF_ADDR;
+	volatile uint32_t *done     = (volatile uint32_t *)PSM_DONE_ADDR;
+	uint32_t g;
+
+	*frce_off |= PSM_PROC1_BIT;
+	g = 2000000u; while (!(*frce_off & PSM_PROC1_BIT) && --g) ;
+	*frce_off &= ~PSM_PROC1_BIT;
+	g = 2000000u; while (!(*done & PSM_PROC1_BIT) && --g) ;
+}
+
+/* Launch core1 via the SIO FIFO handshake. Returns 0 on success, -1 on
+ * timeout (core0 then just boots Linux, so the board is never bricked). */
+static int launch_core1(void) {
+	volatile uint32_t *fifo_st = &SIO_BASE[0x50 / 4];
+	volatile uint32_t *fifo_wr = &SIO_BASE[0x54 / 4];
+	volatile uint32_t *fifo_rd = &SIO_BASE[0x58 / 4];
+
+	const uint32_t cmd_seq[6] = {
+		0, 0, 1,
+		(uint32_t)&core1_main,   /* vector_table (mtvec): must be nonzero (0 = resync) */
+		C1_STACK_TOP,            /* sp */
+		(uint32_t)&core1_main    /* entry */
+	};
+
+	uint32_t seq = 0;
+	int tries = 0;
+
+	printf("[c1] entry=0x%08x ST0=0x%08x\n", (uint32_t)&core1_main, *fifo_st);
+	reset_core1();
+	printf("[c1] after reset ST=0x%08x\n", *fifo_st);
+
+	while (seq < 6) {
+		uint32_t cmd = cmd_seq[seq];
+		uint32_t guard, resp;
+		int to;
+
+		if (++tries > 40) {
+			printf("[c1] give up tries=%d seq=%d\n", tries, seq);
+			return -1;
+		}
+
+		if (cmd == 0) {
+			while (*fifo_st & 1u) /* drain RX FIFO */
+				(void)*fifo_rd;
+			h3_unblock();
+		}
+
+		/* push, blocking on TX-ready, with timeout */
+		guard = 3000000u; to = 0;
+		while (!(*fifo_st & 2u))
+			if (!--guard) { to = 1; break; }
+		if (to) { printf("[c1] TX timeout seq=%d\n", seq); return -1; }
+		*fifo_wr = cmd;
+		__asm__ volatile ("fence" ::: "memory");
+		h3_unblock();
+
+		/* pop, blocking on RX-valid, with timeout */
+		guard = 3000000u; to = 0;
+		while (!(*fifo_st & 1u))
+			if (!--guard) { to = 1; break; }
+		if (to) { printf("[c1] RX timeout seq=%d push=0x%08x\n", seq, cmd); return -1; }
+		resp = *fifo_rd;
+
+		printf("[c1] seq=%d push=0x%08x resp=0x%08x %s\n",
+		       seq, cmd, resp, (cmd == resp) ? "OK" : "MISMATCH");
+		seq = (cmd == resp) ? seq + 1 : 0;   /* bootrom echoes each word */
+	}
+	printf("[c1] handshake complete\n");
+	return 0;
+}
+#endif /* !PICO_SDK */

@@ -25,7 +25,7 @@ CFLAGS :=	-std=gnu11 \
 ASFLAGS := $(CFLAGS)
 LDFLAGS := -nostdlib -Wl,--gc-sections
 
-S_SOURCES = src/rp2350-crt.S src/rp2350-hdr.S
+S_SOURCES = src/rp2350-crt.S src/rp2350-hdr.S src/core1-exec-trap.S
 C_SOURCES = src/main.c src/uart.c src/string.c src/qmi.c src/image.c src/printf.c
 
 OBJECTS = $(addprefix $(BUILD_DIR)/,$(notdir $(C_SOURCES:.c=.o)))
@@ -84,6 +84,8 @@ $(BUILD_DIR)/$(PROGRAM).uf2: $(BUILD_DIR)/$(PROGRAM).elf
 
 $(BUILD_DIR)/$(PROGRAM).bin: $(BUILD_DIR)/$(PROGRAM).elf
 	$(OBJCOPY) -O binary $< $@
+	@# truncate .bin to __payload_load_start, else the DTB shifts (Bad DT magic)
+	truncate -s $$(( 0x$$($(CROSS_COMPILE)nm $< | awk '$$3=="__payload_load_start"{print $$1}') - 0x10000000 )) $@
 
 # Dummy payload file so we won't get errors if it doesn't exist
 payload.bin:
