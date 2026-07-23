@@ -11,7 +11,7 @@ diff -ruN a/drivers/misc/Kconfig b/drivers/misc/Kconfig
 +	default y
 +	help
 +	  Char device /dev/core1 and /sys/class/core1 to control the RP2350
-+	  bare-metal core1 coprocessor (SRAM mailbox: write=piojob, read=result).
++	  bare-metal core1 coprocessor (SRAM mailbox: write=c1p, read=result).
 +
  endmenu
 diff -ruN a/drivers/misc/Makefile b/drivers/misc/Makefile
@@ -31,7 +31,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 + * RP2350 core1 coprocessor control.
 + *
 + * Exposes the bare-metal second core (RISC-V Hazard3) to userspace:
-+ *   write(/dev/core1, piojob)  load and run a PIO program (.piojob blob)
++ *   write(/dev/core1, c1p)  load and run a PIO program (.c1p blob)
 + *   read(/dev/core1)           result word of the last command (u32 LE)
 + *   /sys/class/core1/core1/*   discrete commands and parameters
 + *
@@ -67,7 +67,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +#define SR_PIO_JOB	0x100
 +#define PIO_JOB_MAX	0x100
 +
-+#define PIOB_MAGIC	0x424F4950u	/* 'PIOB' */
++#define C1PB_MAGIC	0x42503143u	/* 'C1PB' */
 +
 +/* core1 command opcodes (op << 24 | arg) */
 +#define OP_PING		0x01000000u
@@ -210,7 +210,7 @@ diff -ruN a/drivers/misc/rp2350-core1.c b/drivers/misc/rp2350-core1.c
 +		return -EINVAL;
 +	if (copy_from_user(job, buf, len))
 +		return -EFAULT;
-+	if (magic != PIOB_MAGIC)
++	if (magic != C1PB_MAGIC)
 +		return -EINVAL;
 +
 +	memcpy_toio(c->sr + SR_PIO_JOB, job, len);

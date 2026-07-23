@@ -311,7 +311,7 @@ static void core1_puts(const char *s) {
 }
 
 /*
- * PIO offload: load and run a PIO program passed from Linux as a '.piojob'
+ * PIO offload: load and run a PIO program passed from Linux as a '.c1p'
  * blob in SRAM (C1_PIO_JOB). core1 brings up the PIO block and starts the
  * state machine; the PIO then runs autonomously in hardware.
  */
@@ -327,7 +327,7 @@ static uint32_t pio_load_and_run(void)
 	volatile uint32_t *j32 = (volatile uint32_t *)C1_PIO_JOB;
 	volatile uint16_t *ins = (volatile uint16_t *)(C1_PIO_JOB + 28);
 
-	if (j32[0] != 0x424F4950u)                 /* magic 'PIOB' */
+	if (j32[0] != 0x42503143u)                 /* magic 'C1PB' */
 		return 0xBADF11E0u;
 
 	uint32_t pio_idx = j8[4], sm = j8[5], n = j8[6], flags = j8[7];
@@ -409,7 +409,7 @@ static uint32_t pio0_sm0_pc(void)
 #define C1X_STACK_TOP   0x2005FF00u        /* blob stack top */
 #define C1X_CODE_MAX    0x00008000u
 #define C1X_BSS_MAX     0x00004000u
-#define C1_PIO_JOB      0x20061100u        /* existing .piojob staging */
+#define C1_PIO_JOB      0x20061100u        /* existing .c1p staging */
 #define C1_CTR_ADDR     0x20061000u        /* heartbeat counter */
 
 #define C1X_ERR_MAGIC   0xBADC0DE0u
@@ -436,7 +436,7 @@ struct c1_services {
 	void     (*puts)(const char *s);
 	void     (*udelay)(uint32_t us);
 	uint32_t (*counter)(void);
-	int32_t  (*load_pio)(const void *piojob);
+	int32_t  (*load_pio)(const void *c1p);
 };
 
 /* core1_putc/core1_puts/pio_load_and_run are defined earlier in main.c */
@@ -482,7 +482,7 @@ static int32_t c1x_svc_load_pio(const void *job)
 	volatile uint8_t *d = (volatile uint8_t *)C1_PIO_JOB;
 	uint32_t n_instr, total, i;
 
-	/* .piojob length = 28-byte header + 2*n_instr opcodes (n_instr @ byte 6) */
+	/* .c1p length = 28-byte header + 2*n_instr opcodes (n_instr @ byte 6) */
 	n_instr = s[6];
 	total = 28u + 2u * n_instr;
 	if (total > 256u)
@@ -564,7 +564,7 @@ static uint32_t core1_handle(uint32_t cmd)
 	                FIFO is dropped by hardware (TXOVER), it does not stall the bus. */
 		volatile uint32_t *J  = (volatile uint32_t *)C1_PIO_JOB;
 		volatile uint8_t  *j8 = (volatile uint8_t  *)C1_PIO_JOB;
-		if (J[0] == 0x424F4950u) {                       /* 'PIOB' */
+		if (J[0] == 0x42503143u) {                       /* 'C1PB' */
 			uint32_t pio = j8[4], sm = j8[5];
 			volatile uint32_t *P =
 				(volatile uint32_t *)(0x50200000u + pio * 0x100000u);
